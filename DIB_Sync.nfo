@@ -1,0 +1,56 @@
+                                           
+ ____  _____ _____       _____             
+|    \|     | __  |     |   __|_ _ ___ ___ 
+|  |  |-   -| __ -|     |__   | | |   |  _|
+|____/|_____|_____|_____|_____|_  |_|_|___|
+                  |_____|     |___|             by m0xX  
+===============================================================================
+                       D I B _ S Y N C   b y   m 0 x X
+===============================================================================
+                     A 60 FPS Win32 Audio-Visual Experience
+                                 Release: 2026
+===============================================================================
+
+ [ OVERVIEW ]
+ -----------------------------------------------------------------------------
+ Title        : DIB_Sync
+ Author       : m0xX
+ Platform     : Windows (Win7 through Win11, 32-bit / 64-bit compatible)
+ Type         : Native Win32 Audio-Visual Demo / Demoscene Engine
+ Binary Size  : ~80 KB (Compressed via Petite v2.2)
+ Audio Engine : MiniFMOD (Embedded XM Tracker Module, 48 KB)
+ Rendering    : Direct-RAM ARGB DIB Section + Inline x86 Assembly (RDTSC PRNG)
+
+
+ [ FEATURES & SLOTS ]
+ -----------------------------------------------------------------------------
+ * 21 Real-time visual slots with seamless transition framework
+ * Slot 20: Procedural B&W TV Static, VCR horizontal tearing & V-SYNC roll
+ * Audio-reactive beat sync modulation driven by g_beatPulse
+ * Zero hardware GPU requirements — 100% CPU software rasterization
+ * Full screen / Windowed resolution selector with customizable frame cap
+
+
+ [ RUNTIME CONTROLS ]
+ -----------------------------------------------------------------------------
+ [ ENTER ]      : Confirm startup resolution & launch
+ [ SPACE ]      : Jump immediately to next visual slot
+ [ ESC ]        : Exit application
+
+
+ [ TECH STACK & CREDITS ]
+ -----------------------------------------------------------------------------
+ Code & FX      : m0xX (Compiled with IWBasic 2.5)
+ Audio Library  : MiniFMOD by Firelight Technologies
+ Executable Pack: Petite v2.2 by un4seen developments
+ Target OS      : Optimized for low-latency Win32 DIB surface rendering
+
+
+ [ REQUIREMENTS & COMPATIBILITY ]
+ -----------------------------------------------------------------------------
+ Works out of the box on Windows 7, 10, and 11. No external DLL dependencies,
+ no runtime installers required. Fully standalone binary.
+
+===============================================================================
+                        (c) 2026 m0xX - DEMOSCENE RELEASE
+===============================================================================
