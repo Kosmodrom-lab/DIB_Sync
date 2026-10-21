@@ -3,6 +3,7 @@
 
 **DIB_Sync** is a lightweight, low-latency 60 FPS audio-visual engine built specifically for Win32. Driven by Direct-RAM ARGB surface manipulation and embedded assembly routines, it delivers high-performance software rasterization and audio-reactive visual effects without requiring hardware GPU acceleration.
 
+![Main View](DIB_Sync.png)
 ---
 
 ## 🎨 Overview
