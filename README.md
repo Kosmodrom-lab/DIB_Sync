@@ -1,3 +1,6 @@
+![Platform](https://img.shields.io/badge/Platform-Windows%207%20%7C%208%20%7C%2010%20%7C%2011-blue)
+![Language](https://img.shields.io/badge/Language-IWBasic%202.5-orange)
+
 [DIB_Sync.zip](https://github.com/user-attachments/files/32267992/DIB_Sync.zip)
 # DIB_Sync
 
