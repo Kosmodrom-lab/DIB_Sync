@@ -1,0 +1,5165 @@
+'
+' DIB_Sync.iwb: Final Direct-RAM Pure ASM Pipeline (V101)
+'
+$USE "minifmod.lib"
+
+$INCLUDE "windowssdk.inc"
+$INCLUDE "minifmod.inc"
+
+AUTODEFINE "Off"
+
+CONST SPI_SETSCREENSAVERUNNING = 97
+CONST HWND_TOPMOST = -1
+CONST SWP_NOMOVE = 2
+CONST SWP_NOSIZE = 1
+
+' --- WIN32 RESOURCE APIS ---
+DECLARE IMPORT, API_LoadResource ALIAS "LoadResource"(hModule:INT, hResInfo:INT), INT
+
+' --- MEMORY FILE TRACKING STRUCTURE ---
+TYPE tMEMFILE
+    DEF length:INT
+    DEF pos:INT
+    DEF pdata:POINTER
+ENDTYPE
+
+TYPE BITMAPINFO
+    DEF biSize:INT
+    DEF biWidth:INT
+    DEF biHeight:INT
+    DEF biPlanes:WORD
+    DEF biBitCount:WORD
+    DEF biCompression:INT
+    DEF biSizeImage:INT
+    DEF biXPelsPerMeter:INT
+    DEF biYPelsPerMeter:INT
+    DEF biClrUsed:INT
+    DEF biClrImportant:INT
+ENDTYPE
+
+' --- AMIGA FLY-IN OUTRO GLOBALS ---
+TYPE FLY_LETTER
+    DEF active:INT
+    DEF charCode:INT
+    DEF currentX:FLOAT
+    DEF currentY:FLOAT
+    DEF targetX:FLOAT
+    DEF targetY:FLOAT
+    DEF vx:FLOAT
+    DEF vy:FLOAT
+    DEF arrived:INT
+ENDTYPE
+
+' --- GLOBAL DIALOG & RESOLUTION VARIABLES ---
+PROJECTGLOBAL "on"
+    INT g_screenWidth
+    INT g_screenHeight
+    INT g_isFullScreen
+    INT g_winW, g_winH                       ' window client size, or the screen size in fullscreen
+    INT g_dstX, g_dstY, g_dstW, g_dstH       ' destination rectangle of the blit
+    INT g_needScale = 0
+    INT g_letterbox = 1                      ' 1 = keep aspect (black bars), 0 = fill the whole window/screen
+    POINTER g_pResMemData
+    INT g_nResMemSize
+    INT g_pMiniFmodSong
+    INT myMusicHandler
+    ' --- AUDIO PULSE ENGINE GLOBALS ---
+    INT g_lastRow = -1
+    FLOAT g_beatPulse = 0.0
+    FLOAT g_bassEnvelope = 0.0
+PROJECTGLOBAL "off"
+
+' Control IDs
+CONST RENDER_MAX_W = 800
+CONST RENDER_MAX_H = 600
+CONST ID_RAD_640  = 101
+CONST ID_RAD_800  = 102
+CONST ID_RAD_1024 = 103
+CONST ID_RAD_FULL = 104
+CONST ID_BTN_OK    = 105
+CONST ID_CHK_TURBO = 106
+
+CONST MAX_SCROLL_LETTERS = 28
+CONST VERTX = 3
+CONST VERTY = 3
+
+CONST TNL_TWIDTH  = 128
+CONST TNL_THEIGHT = 128
+CONST TNL_TSHIFT  = 7
+CONST PI_VAL = 3.14159265
+
+' Declare callback signatures with CDECL convention
+DECLARE CDECL memopen(pname:STRING), POINTER
+DECLARE CDECL memclose(handle:POINTER)
+DECLARE CDECL memread(buffer:POINTER, size:INT, handle:POINTER), INT
+DECLARE CDECL memseek(handle:POINTER, pos:INT, mode:SCHAR)
+DECLARE CDECL memtell(handle:POINTER), INT
+
+' Set callback export symbols
+GLOBAL memopen
+GLOBAL memclose
+GLOBAL memread
+GLOBAL memseek
+GLOBAL memtell
+
+' ===============================================================================
+' SUBROUTINE DECLARATIONS
+' ===============================================================================
+DECLARE ShowResolutionDialog(), INT
+DECLARE ResDialogHandler(), INT
+DECLARE InitMetaballsLUT()
+DECLARE DrawMetaballsEffectDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+DECLARE InitGraphics()
+DECLARE InitEffectColors()
+DECLARE InitEffectResources()
+DECLARE InitEffect(num:INT)
+DECLARE DrawBuffered()
+DECLARE FastClearBuffer(pBuffer:POINTER, numBytes:INT)
+DECLARE AdditiveBlendASM(pTargetBuf:POINTER, pSrcBuf:POINTER, numPix:INT)
+DECLARE InitVectorFontTable()
+DECLARE SetStroke(charIdx:INT, strokeIdx:INT, x1:INT, y1:INT, x2:INT, y2:INT)
+DECLARE EndGlyph(charIdx:INT, strokeIdx:INT)
+DECLARE DrawLineDirect(pBuffer:POINTER, screenW:INT, screenH:INT, x1:INT, y1:INT, x2:INT, y2:INT, penColor:INT)
+DECLARE DrawLineTranslucent(pBuffer:POINTER, screenW:INT, screenH:INT, x1:INT, y1:INT, x2:INT, y2:INT)
+DECLARE DrawVectorStringDirect(pBuffer:POINTER, screenW:INT, screenH:INT, textStr:STRING, posX:INT, posY:INT, scaleFX:INT, penColor:INT)
+DECLARE DrawVectorCharDirect(pBuffer:POINTER, screenW:INT, screenH:INT, charCode:INT, posX:INT, posY:INT, scaleFX:INT, penColor:INT)
+DECLARE DrawVectorCharShadow(pBuffer:POINTER, screenW:INT, screenH:INT, charCode:INT, posX:INT, posY:INT, scaleFX:INT)
+DECLARE GetCycleColor(colorPhase:INT), INT
+DECLARE DrawRasterbarsEffectDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+DECLARE DrawRasterbarLogoComposite(pBuffer:POINTER, screenW:INT, screenH:INT)
+DECLARE UpdateAndDrawStarfieldDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+DECLARE DrawDottedLineDirect2X(pBuffer:POINTER, screenW:INT, screenH:INT, x1:INT, y1:INT, x2:INT, y2:INT, penColor:INT)
+DECLARE DrawDottedLineDirect4X(pBuffer:POINTER, screenW:INT, screenH:INT, x1:INT, y1:INT, x2:INT, y2:INT, penColor:INT)
+DECLARE DrawFaceGridDirect(pBuffer:POINTER, screenW:INT, screenH:INT, x0:INT, y0:INT, x1:INT, y1:INT, x2:INT, y2:INT, x3:INT, y3:INT, penColor:INT)
+DECLARE DrawSpinningCubeDirect(pBuffer:POINTER, screenW:INT, screenH:INT, penColor:INT)
+DECLARE DrawDottedSphereDirect(pBuffer:POINTER, screenW:INT, screenH:INT, penColor:INT)
+DECLARE Draw3DTorusDirect(pBuffer:POINTER, screenW:INT, screenH:INT, penColor:INT)
+DECLARE DrawSuperRoseCurveDirect(pBuffer:POINTER, screenW:INT, screenH:INT, penColor:INT)
+DECLARE DrawWaveRipplesDirect(pBuffer:POINTER, screenW:INT, screenH:INT, penColor:INT)
+DECLARE DrawGravityWebDirect(pBuffer:POINTER, screenW:INT, screenH:INT, penColor:INT)
+DECLARE DrawCircleDirect(pBuffer:POINTER, screenW:INT, screenH:INT, cxVal:INT, cyVal:INT, radius:INT, penColor:INT)
+DECLARE DrawMoireInterferenceDirect(pBuffer:POINTER, screenW:INT, screenH:INT, penColor:INT)
+DECLARE DrawRotozoomDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+DECLARE PlotRectDirect(pBuffer:POINTER, screenW:INT, screenH:INT, x:INT, y:INT, w:INT, h:INT, penColor:INT)
+DECLARE DrawFireworksDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+DECLARE DrawCubeEffectDirectTransparent4X(pBuffer:POINTER, screenW:INT, screenH:INT)
+' --- HAIKU GENERATOR & OVERLAY DECLARATIONS ---
+DECLARE InitTechDictionary()
+DECLARE PickRandomWord(category:INT), STRING
+DECLARE CountSyllables(wStr:STRING), INT
+DECLARE BuildHaikuLine(targetSyllables:INT), STRING
+DECLARE GenerateStrictHaiku()
+DECLARE RenderHaikuOverlayDirect(pPixelBuffer:POINTER, screenW:INT, screenH:INT, phaseVal:DOUBLE)
+DECLARE DrawAnimatedTitleDirect(pBuffer:POINTER, screenW:INT, screenH:INT, titleText:STRING, targetY:INT)
+DECLARE InitEffectNames()
+DECLARE InitEffectTechSpecs()
+DECLARE DrawBouncingOverlayNameDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+DECLARE InitRasterbarPhysics()
+DECLARE DrawPlasmaEffectDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+DECLARE InitCubeData()
+DECLARE DrawDottedWormholeDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+DECLARE InitWaveBuffers()
+DECLARE InjectWaveDrop(pBuf:POINTER, bufW:INT, bufH:INT, dropX:INT, dropY:INT, radius:INT, force:INT)
+DECLARE ProcessWaveSimulation(pSrcBuf:POINTER, pDstBuf:POINTER, bufW:INT, bufH:INT)
+DECLARE RenderWaveHeightMap(pHeightBuf:POINTER, pPixelBuf:POINTER, screenW:INT, screenH:INT, penColor:INT)
+DECLARE InitFireEngine()
+DECLARE DrawFireEffectDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+DECLARE InitOutroPages()
+DECLARE LoadOutroPage(pageIdx:INT)
+DECLARE UpdateAndDrawFlyInOutroDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+DECLARE ApplyTrailDecaySSE2(pBuffer:POINTER, numPix:INT, decayFactor:INT)
+DECLARE InitCheckerboardBitmap()
+DECLARE DrawScrollingCheckerboardDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+DECLARE InitVectorFontData()
+DECLARE DrawVectorSegments(pBuffer:POINTER, sW:INT, sH:INT, charIdx:INT, penColor:INT)
+DECLARE Render3DVectorScroller(pBuffer:POINTER, screenW:INT, screenH:INT, penColor:INT)
+DECLARE InitAndPlayAudioFromResource(resID:INT), INT
+DECLARE Draw3DGridMeshDirect(pBuffer:POINTER, screenW:INT, screenH:INT, penColor:INT)
+DECLARE DrawHyperStarsDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+DECLARE DrawHyperShip(pBuffer:POINTER, screenW:INT, screenH:INT, bankAng:FLOAT, driftX:FLOAT, driftY:FLOAT, tPhase:FLOAT)
+DECLARE DrawProceduralLogo(pBuffer:POINTER, screenW:INT, screenH:INT, startX:INT, startY:INT)
+DECLARE SW_InitEngine()
+DECLARE SW_DrawTriangle(x1 AS INT, y1 AS INT, x2 AS INT, y2 AS INT, x3 AS INT, y3 AS INT, argbColor AS UINT, pPixelBuffer AS POINTER)
+DECLARE SW_DrawBob16x16(bx AS INT, by AS INT, rVal AS INT, gVal AS INT, bVal AS INT, pPixelBuffer AS POINTER, screenW AS INT, screenH AS INT)
+DECLARE SW_RenderBobSnakeProcedural(pPixelBuffer AS POINTER, screenW AS INT, screenH AS INT)
+DECLARE SW_RenderBorders(gadd2 AS DOUBLE, pPixelBuffer AS POINTER, screenW AS INT, screenH AS INT)
+DECLARE DrawBobGridComposite(pBuffer:POINTER, screenW:INT, screenH:INT)
+DECLARE DrawIsometricFlyoverDirect(pPixelBuffer:POINTER, screenW:INT, screenH:INT, phaseVal:DOUBLE)
+DECLARE DrawStreakAdd(pBuffer:POINTER, screenW:INT, x1:INT, y1:INT, x2:INT, y2:INT, penColor:INT, clipL:INT, clipT:INT, clipR:INT, clipB:INT)
+DECLARE PlasmaTextureGenerator(k1Val:INT)
+DECLARE InitTunnelEngine(w:INT, h:INT)
+DECLARE ATAN2(y:FLOAT, x:FLOAT), FLOAT
+DECLARE Handler(), INT
+DECLARE StopAndFreeAudio()
+DECLARE FreeEngineBuffers(pParam AS POINTER), INT
+
+PROJECTGLOBAL "on"
+    WINDOW main_win
+    DIALOG dlgRes
+    INT hWindowDC
+    INT active, screenW, screenH, cx, cy, current_overlay, frame_count
+    FLOAT phase, rot, grow
+    INT starX[150], starY[150], starZ[150]
+    FLOAT starDX[150]
+    FLOAT cubeX[8], cubeY[8], cubeZ[8]
+    FLOAT rotX, rotY, rotZ
+    INT effectColors[12]
+    INT sinTable[256], cosTable[256]
+    INT copperIntensityLUT[21]
+    INT fireworkState[3]
+    INT fireworkX[3], fireworkY[3], partLife[3]
+    FLOAT partX[3, 30], partY[3, 30], partVX[3, 30], partVY[3, 30]
+    BITMAPINFO bmpInfo
+    INT hMemDC, hMemBmp, hOldBmp
+    POINTER pPixelBuffer, pCopperBuffer
+    INT fontData[63, 48]
+    STRING effectTechSpecs[22], effectNames[22]
+    INT g_overlayEpoch = 0                      ' +1 every time the effect changes (automatically or with SPACE)
+    INT g_gwDot
+
+    ' Real Gravity Web
+    FLOAT gwX[24], gwY[24], gwVX[24], gwVY[24], gwAX[24], gwAY[24], gwM[24]
+    FLOAT gwW2[24], gwAnX[24], gwAnY[24]
+
+    ' DEMOSCENE HAIKU GENERATOR
+    STRING g_HaikuLine1, g_HaikuLine2, g_HaikuLine3
+	INT g_HaikuGenerated = 0
+
+    INT numTechAd, numTechNouns, numTechVerbs, numTechPreps
+    STRING techAd[60, 20]
+    STRING techNoun[60, 20]
+    STRING techVerb[60, 20]
+    STRING techPrep[40, 20]
+
+    ' Plasma Generatot
+    POINTER g_asmPixel
+    INT g_asmColor
+    INT g_asmPitch
+    ' Plasma textures generator arrays
+    POINTER g_pDistBuffer = 0
+    POINTER g_pAngleBuffer = 0
+    INT fsin1[4096]
+    INT fsin2[4096]
+    INT fsin3[4096]
+    INT coloop[256]
+    INT tunnel_texture[16384]
+
+    ' Declare global Hyperstars arrays at module scope
+    FLOAT g_starX[501]
+    FLOAT g_starY[501]
+    FLOAT g_starZ[501]
+    INT g_hyperStarsInit = 0
+    INT g_warpSpeedActive = 0
+    INT g_stL, g_stT, g_stR, g_stB, g_stF, g_stInc
+    FLOAT g_shipX[11], g_shipY[11], g_shipZ[11]
+    INT g_shipSX[11], g_shipSY[11], g_shipEA[14], g_shipEB[14]
+    INT g_shipInit = 0
+
+
+
+    ' --- 3D VECTOR SCROLLER ENGINE GLOBALS ---
+    FLOAT fontGridX[3, 3, 28]
+    FLOAT fontGridY[3, 3, 28]
+    FLOAT fontGridZ[3, 3, 28]
+    INT projX1[3, 3]
+    INT projY1[3, 3]
+    INT letterStruct[20, 65]
+    STRING scrollText
+    INT scrollIndex
+    FLOAT scrollXPos
+    FLOAT scrollRotX, scrollRotY, scrollRotZ
+
+    POINTER g_pTextLayer = NULL
+    POINTER g_pCheckerBuffer
+    POINTER pTrailBuffer
+
+    FLY_LETTER outroLetters[120]
+    INT g_outroLetterCount
+    INT g_outroPageIdx
+    INT g_outroState
+    FLOAT g_outroStateTimer
+    INT g_nextLetterLaunchIdx
+    STRING outroPages[3, 3]
+
+    POINTER g_pFireBuffer
+    INT firePalette[256]
+
+    POINTER g_pWaveBuffer1
+    POINTER g_pWaveBuffer2
+    INT g_activeWaveBuf
+    FLOAT g_waveTransformTimer
+
+    INT g_turboMode
+
+    FLOAT cubeVerts[24]
+    INT cubeEdges[24]
+    FLOAT projX[8]
+    FLOAT projY[8]
+
+    INT tunnelAngleLUT[200, 200]
+    INT tunnelDepthLUT[200, 200]
+
+    INT metaballLUT[384, 384]
+    FLOAT mbX[4], mbY[4]
+    FLOAT mbVX[4], mbVY[4]
+
+    FLOAT barY[8]
+    FLOAT barVel[8]
+
+    INT lastOverlayIdx
+    FLOAT bannerDropTimer
+
+    POINTER g_pAsmLine, g_pAsmPixel, g_pAsmDst, g_pAsmSrc
+    INT g_asmPixelColor, g_asmLinePixelColor, g_asmCount, g_asmNumBytes
+	INT g_asmBeatShift, g_asmGainMask
+    INT g_lineX1, g_lineY1, g_lineX2, g_lineY2
+    INT g_lineDx, g_lineDy, g_lineSx, g_lineSy, g_lineErr, g_lineNegDy
+    INT g_asmDecay, g_asmAlpha, g_asmInvAlpha
+
+    INT g_circleXc, g_circleYc, g_circleR
+    INT g_circleX, g_circleY, g_circleErr
+
+    INT g_asmStride
+    POINTER g_pHyperStarsLayer = 0
+
+    ' --- GLOBAL SCRATCH VARIABLES FOR ASM BLOCKS ---
+    UINT g_sw_AsmColor
+    UINT g_sw_AsmCount
+    UINT g_sw_AsmDest
+
+	 ' --- GLOBAL PRE-COMPUTED BUFFER METRICS ---
+    INT g_bufferByteSize
+    INT g_bufferDwordCount
+
+    ' --- DATA ARRAYS ---
+    double g_sw_SinTable[15000]
+    double g_sw_StX[3001]
+    double g_sw_StY[3001]
+    double g_sw_StZ[3001]
+    double g_sw_StXR[3001]
+    double g_sw_StYR[3001]
+
+    double g_sw_Cbx[51, 51]
+    double g_sw_Cby[51, 51]
+
+    UINT g_sw_FontData[4096]
+    INT g_sw_BobArray2[25]
+    INT g_sw_BobArray16[256]
+    UINT g_sw_Palette[4000]
+
+    ' --- 3D MESH STORAGE ---
+    INT g_sw_MeshPoints
+    INT g_sw_MeshFaces
+    double g_sw_Vx[20], g_sw_Vy[20], g_sw_Vz[20]
+    INT g_sw_Vtx[20], g_sw_Vty[20], g_sw_Vtz[20]
+    INT g_sw_Vf1[30], g_sw_Vf2[30], g_sw_Vf3[30], g_sw_Vf4[30]
+    INT g_sw_Vr[30], g_sw_Vg[30], g_sw_Vb[30]
+    double g_sw_Vxr, g_sw_Vyr, g_sw_Vzr
+
+    STRING haikuLine1[8]
+    STRING haikuLine2[8]
+    STRING haikuLine3[8]
+    INT currentLine1Idx, currentLine2Idx, currentLine3Idx
+
+    INT g_tvSeed = 0x2545F491          ' xorshift32 state, must never be 0
+    INT g_tvBias = 0                   ' brightness added by the beat
+
+    ' --- CAROUSEL CROSS-FADE TRANSITION GLOBALS ---
+    POINTER pTransitionBuffer = NULL
+    INT g_isTransitioning = 0
+    INT g_transitionFrame = 0
+    CONST TRANSITION_DURATION = 30 ' Cross-fade length in frames (~0.5s at 60 FPS)
+
+    ' Post Processing
+    INT hPostDC, hPostBmp, hOldPostBmp
+    POINTER pPostBuffer
+    INT g_postFX = 1
+    INT g_pfChunks, g_pfLastRow, g_pfShiftBytes, g_pfFlash, g_pfDark
+PROJECTGLOBAL "off"
+
+' --- MAIN INITIALIZATION BLOCK ---
+g_screenWidth = 800
+g_screenHeight = 600
+g_isFullScreen = 0
+g_pResMemData = NULL
+g_nResMemSize = 0
+g_pMiniFmodSong = 0
+myMusicHandler = 0
+g_pCheckerBuffer = NULL
+g_outroLetterCount = 0
+g_outroPageIdx = 0
+g_outroState = 0
+g_outroStateTimer = 0.0
+g_nextLetterLaunchIdx = 0
+g_activeWaveBuf = 0
+g_waveTransformTimer = 0.0
+g_turboMode = 0
+
+$MAIN
+
+InitEffectColors()
+InitVectorFontTable()
+
+IF ShowResolutionDialog() = 1 THEN
+
+    INT winFlags
+
+    IF g_isFullScreen THEN
+        winFlags = @NOCAPTION | @NOAUTODRAW | @TOPMOST
+    ELSE
+        winFlags = @CAPTION | @SYSMENU | @MINBOX | @NOAUTODRAW
+    ENDIF
+
+    IF OPENWINDOW(main_win, 0, 0, g_winW, g_winH, winFlags, 0, "DIB_Sync!", &Handler) THEN
+		  SETICON main_win, 1
+        
+        IF g_isFullScreen = 0 THEN CENTERWINDOW main_win
+
+        cx = g_screenWidth / 2
+        cy = g_screenHeight / 2
+
+        ' Register automatic LIFO cleanup handler on program startup
+        ONEXIT(&FreeEngineBuffers, NULL)
+
+        InitGraphics()
+        InitCubeData()
+        InitEffectResources()
+        InitTechDictionary()
+		  GenerateStrictHaiku() ' Pre-builds the first 5-7-5 poem before loop starts)
+        InitEffectNames()
+        InitRasterbarPhysics()
+        InitMetaballsLUT()
+        InitEffect(0)
+        InitEffectNames()
+        InitEffectTechSpecs()
+        InitFireEngine()
+        InitCheckerboardBitmap()
+        InitVectorFontData()
+        InitOutroPages()
+        InitTunnelEngine(g_screenWidth, g_screenHeight)
+        SW_InitEngine()
+
+        IF InitAndPlayAudioFromResource(1000) = 0 THEN
+            MESSAGEBOX(0, "Problem initializing audio from resource!", "Warning")
+        ELSE
+            myMusicHandler = g_pMiniFmodSong
+        ENDIF
+
+        INT lastTick, currentTick, frameDelay
+        frameDelay = 16
+        lastTick = timeGetTime()
+
+        WHILE main_win <> 0
+            WAIT 1
+
+            IF g_turboMode = 1 THEN
+                Sleep(0)
+                DrawBuffered()
+            ELSE
+                currentTick = timeGetTime()
+                IF (currentTick - lastTick) >= frameDelay THEN
+                    lastTick = currentTick
+                    DrawBuffered()
+                ELSE
+                    Sleep(1)
+                ENDIF
+            ENDIF
+        ENDWHILE
+
+    ENDIF
+
+ENDIF
+
+END
+
+' internal render size = the window size, but never more than 800x600
+SUB SetRenderSize()
+    g_screenWidth  = g_winW
+    g_screenHeight = g_winH
+    IF g_screenWidth > RENDER_MAX_W OR g_screenHeight > RENDER_MAX_H THEN
+        g_screenWidth  = RENDER_MAX_W
+        g_screenHeight = RENDER_MAX_H
+    ENDIF
+    screenW = g_screenWidth
+    screenH = g_screenHeight
+ENDSUB
+
+' destination rectangle (call after SetRenderSize and after the window exists)
+SUB ComputeBlitRect()
+    g_dstX = 0
+    g_dstY = 0
+    g_dstW = g_winW
+    g_dstH = g_winH
+    IF g_letterbox = 1 THEN
+        IF g_winW * screenH > g_winH * screenW THEN       ' window is wider than the render aspect
+            g_dstW = (g_winH * screenW) / screenH
+            g_dstX = (g_winW - g_dstW) / 2
+        ELSE
+            g_dstH = (g_winW * screenH) / screenW
+            g_dstY = (g_winH - g_dstH) / 2
+        ENDIF
+    ENDIF
+    IF g_dstW = screenW AND g_dstH = screenH AND g_dstX = 0 AND g_dstY = 0 THEN
+        g_needScale = 0
+    ELSE
+        g_needScale = 1
+    ENDIF
+ENDSUB
+
+SUB FreeEngineBuffers(pParam AS POINTER), INT
+    ' 1. Halt audio hardware stream
+    StopAndFreeAudio()
+
+    ' 2. Release Win32 Device Contexts
+    IF hMemDC <> 0 THEN
+        SelectObject(hMemDC, hOldBmp)
+        DeleteObject(hMemBmp)
+        DeleteDC(hMemDC)
+        hMemDC = 0
+    ENDIF
+
+   IF hPostDC <> 0 THEN
+       SelectObject(hPostDC, hOldPostBmp)
+       DeleteObject(hPostBmp)
+       DeleteDC(hPostDC)
+       hPostDC = 0
+   ENDIF
+
+    IF hWindowDC <> 0 THEN 
+        ReleaseDC(main_win.hwnd, hWindowDC)
+        hWindowDC = 0
+    ENDIF
+
+    ' 3. Free All Dynamically Allocated Pixel Buffers
+    IF g_pHyperStarsLayer <> NULL THEN FREEMEM g_pHyperStarsLayer : g_pHyperStarsLayer = NULL
+    IF pCopperBuffer      <> NULL THEN FREEMEM pCopperBuffer      : pCopperBuffer = NULL
+    IF pTrailBuffer       <> NULL THEN FREEMEM pTrailBuffer       : pTrailBuffer = NULL
+    IF g_pCheckerBuffer   <> NULL THEN FREEMEM g_pCheckerBuffer   : g_pCheckerBuffer = NULL
+    IF g_pFireBuffer      <> NULL THEN FREEMEM g_pFireBuffer      : g_pFireBuffer = NULL
+    IF g_pWaveBuffer1     <> NULL THEN FREEMEM g_pWaveBuffer1     : g_pWaveBuffer1 = NULL
+    IF g_pWaveBuffer2     <> NULL THEN FREEMEM g_pWaveBuffer2     : g_pWaveBuffer2 = NULL
+    IF g_pTextLayer       <> NULL THEN FREEMEM g_pTextLayer       : g_pTextLayer = NULL
+    IF pTransitionBuffer  <> NULL THEN FREEMEM pTransitionBuffer  : pTransitionBuffer = NULL
+
+RETURN 0
+ENDSUB
+
+' --- DIALOG SHOW ROUTINE ---
+SUB ShowResolutionDialog(), INT
+    ' Extended height to 225 to fit separator and hotkey instructions neatly
+    CREATEDIALOG dlgRes, 0, 0, 260, 225, @CAPTION | @SYSMENU, 0, "Select Screen Resolution", &ResDialogHandler
+    
+    ' Resolution Controls
+    CONTROL dlgRes, @RADIOBUTTON, "Windowed 640 x 480",         20, 12, 200, 20, @GROUP | @TABSTOP, ID_RAD_640
+    CONTROL dlgRes, @RADIOBUTTON, "Windowed 800 x 600",         20, 34, 200, 20, 0, ID_RAD_800
+    CONTROL dlgRes, @RADIOBUTTON, "Windowed 1024 x 768",        20, 56, 200, 20, 0, ID_RAD_1024
+    CONTROL dlgRes, @RADIOBUTTON, "Full Screen Mode",           20, 78, 200, 20, 0, ID_RAD_FULL
+    
+    ' Options
+    CONTROL dlgRes, @CHECKBOX,    "Turbo Mode! (Uncapped FPS)", 20, 106, 220, 20, @TABSTOP, ID_CHK_TURBO
+    
+    ' Default Focused Start Button (0x0001 = BS_DEFPUSHBUTTON)
+    CONTROL dlgRes, @BUTTON,      "Start Demo",                 70, 134, 120, 26, @TABSTOP | 0x0001, ID_BTN_OK
+    
+    ' Horizontal Separator Rule (0x1000 = SS_SUNKEN)
+    CONTROL dlgRes, @STATIC,      "",                           15, 170, 230, 2,  0x1000, 9990
+    
+    ' Hotkey Instructions Footer (@CTEDITCENTER centers the text)
+    CONTROL dlgRes, @STATIC,      "Press SPACE for next effect  |  ESC to exit", 10, 178, 240, 18, @CTEDITCENTER, 9991
+    
+    RETURN DOMODAL(dlgRes, 0)
+ENDSUB
+
+SUB ResDialogHandler(), INT
+    SELECT @MESSAGE
+        CASE @IDINITDIALOG
+            g_winW = 800 : g_winH = 600
+			SETICON dlgRes, 1
+            CENTERWINDOW dlgRes
+            SETSTATE dlgRes, ID_RAD_800, 1
+			   ' Force input focus directly onto the Start button
+            SETFOCUS dlgRes, ID_BTN_OK
+        CASE @IDCONTROL
+            SELECT @CONTROLID
+                CASE ID_BTN_OK
+                    IF GETSTATE(dlgRes, ID_RAD_640) = 1 THEN
+                        g_winW = 640  : g_winH = 480  : g_isFullScreen = 0
+                    ELSE IF GETSTATE(dlgRes, ID_RAD_800) = 1 THEN
+                        g_winW = 800  : g_winH = 600  : g_isFullScreen = 0
+                    ELSE IF GETSTATE(dlgRes, ID_RAD_1024) = 1 THEN
+                        g_winW = 1024 : g_winH = 768  : g_isFullScreen = 0
+                    ELSE IF GETSTATE(dlgRes, ID_RAD_FULL) = 1 THEN
+                        g_winW = GetSystemMetrics(0) : g_winH = GetSystemMetrics(1)
+                        g_isFullScreen = 1
+                    ENDIF
+                    SetRenderSize()
+                    g_turboMode = GETSTATE(dlgRes, ID_CHK_TURBO)
+                    CLOSEDIALOG dlgRes, 1
+            ENDSELECT
+
+        CASE @IDCLOSEWINDOW
+            CLOSEDIALOG dlgRes, 0
+    ENDSELECT
+    RETURN 0
+ENDSUB
+
+SUB InitOutroPages()
+    outroPages[0, 0] = "DEMOSCENE ENGINE 2026"
+    outroPages[0, 1] = "PURE ASSEMBLY PIPELINE"
+    outroPages[0, 2] = "60 FPS HYBRID ENGINE"
+
+    outroPages[1, 0] = "CODE AND GRAPHICS"
+    outroPages[1, 1] = "m0xX and Gemini"
+    outroPages[1, 2] = "Music by Seablue"
+
+    outroPages[2, 0] = ""
+    outroPages[2, 1] = "Written in iwBasic"
+    outroPages[2, 2] = ""
+
+    g_outroPageIdx = 0
+    LoadOutroPage(0)
+ENDSUB
+
+SUB LoadOutroPage(pageIdx:INT)
+    INT lineIdx, i, charCode, startX, startY
+    INT scaleFX, charSpacing, lineLen
+    STRING lineStr
+    POINTER pStr
+
+    scaleFX = 85196
+    charSpacing = (18 * scaleFX) >> 16
+    g_outroLetterCount = 0
+
+    FOR lineIdx = 0 TO 2
+        lineStr = outroPages[pageIdx, lineIdx]
+        lineLen = LEN(lineStr)
+        
+        IF lineLen > 0 THEN
+            startX = (screenW / 2) - ((lineLen * charSpacing) / 2)
+            startY = (screenH / 2) - 60 + (lineIdx * 35)
+            pStr = &lineStr
+
+            FOR i = 0 TO lineLen - 1
+                charCode = *<CHAR>(pStr + i)
+
+                IF charCode <> 32 AND g_outroLetterCount < 120 THEN
+                    outroLetters[g_outroLetterCount].active    = 0
+                    outroLetters[g_outroLetterCount].charCode = charCode
+                    outroLetters[g_outroLetterCount].targetX   = FLOAT(startX + i * charSpacing)
+                    outroLetters[g_outroLetterCount].targetY   = FLOAT(startY)
+                    
+                    outroLetters[g_outroLetterCount].currentX = FLOAT(startX + i * charSpacing + RAND(-40, 40))
+                    outroLetters[g_outroLetterCount].currentY = FLOAT(screenH + 80)
+                    
+                    outroLetters[g_outroLetterCount].vx        = 0.0
+                    outroLetters[g_outroLetterCount].vy        = -28.0
+                    outroLetters[g_outroLetterCount].arrived   = 0
+
+                    g_outroLetterCount = g_outroLetterCount + 1
+                ENDIF
+            NEXT i
+        ENDIF
+    NEXT lineIdx
+
+    g_outroState = 0
+    g_outroStateTimer = 0.0
+    g_nextLetterLaunchIdx = 0
+ENDSUB
+
+SUB UpdateAndDrawFlyInOutroDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+    INT i, charColor, scaleFX
+    FLOAT dx, dy, dist
+    scaleFX = 85196
+
+    DrawScrollingCheckerboardDirect(pBuffer, screenW, screenH)
+    IF g_outroLetterCount = 0 THEN InitOutroPages()
+
+    g_outroStateTimer = g_outroStateTimer + 0.05
+
+    IF g_outroState = 0 THEN
+        IF g_nextLetterLaunchIdx < g_outroLetterCount AND (INT(g_outroStateTimer * 20.0) % 2 = 0) THEN
+            outroLetters[g_nextLetterLaunchIdx].active = 1
+            g_nextLetterLaunchIdx = g_nextLetterLaunchIdx + 1
+        ENDIF
+
+        INT allArrived = 1
+        FOR i = 0 TO g_outroLetterCount - 1
+            IF outroLetters[i].active = 1 AND outroLetters[i].arrived = 0 THEN
+                allArrived = 0
+                dx = outroLetters[i].targetX - outroLetters[i].currentX
+                dy = outroLetters[i].targetY - outroLetters[i].currentY
+                
+                outroLetters[i].vx = outroLetters[i].vx * 0.78 + dx * 0.12
+                outroLetters[i].vy = outroLetters[i].vy * 0.78 + dy * 0.12
+                
+                outroLetters[i].currentX = outroLetters[i].currentX + outroLetters[i].vx
+                outroLetters[i].currentY = outroLetters[i].currentY + outroLetters[i].vy
+
+                dist = SQRT(dx * dx + dy * dy)
+                IF dist < 1.5 AND ABS(outroLetters[i].vy) < 1.0 THEN
+                    outroLetters[i].currentX = outroLetters[i].targetX
+                    outroLetters[i].currentY = outroLetters[i].targetY
+                    outroLetters[i].arrived   = 1
+                ENDIF
+            ENDIF
+        NEXT i
+
+        IF g_nextLetterLaunchIdx >= g_outroLetterCount AND allArrived = 1 THEN
+            g_outroState = 1
+            g_outroStateTimer = 0.0
+        ENDIF
+
+    ELSE IF g_outroState = 1 THEN
+        IF g_outroStateTimer >= 2.5 THEN
+            g_outroState = 2
+            g_outroStateTimer = 0.0
+            
+            FOR i = 0 TO g_outroLetterCount - 1
+                outroLetters[i].vx = FLOAT(RAND(-4, 4))
+                outroLetters[i].vy = FLOAT(RAND(2, 8))
+            NEXT i
+        ENDIF
+
+    ELSE IF g_outroState = 2 THEN
+        INT allOffScreen = 1
+        FOR i = 0 TO g_outroLetterCount - 1
+            outroLetters[i].vy = outroLetters[i].vy + 1.8
+            outroLetters[i].currentX = outroLetters[i].currentX + outroLetters[i].vx
+            outroLetters[i].currentY = outroLetters[i].currentY + outroLetters[i].vy
+
+            IF outroLetters[i].currentY < (screenH + 50) THEN
+                allOffScreen = 0
+            ENDIF
+        NEXT i
+
+        IF allOffScreen = 1 THEN
+            g_outroPageIdx = (g_outroPageIdx + 1) % 3
+            LoadOutroPage(g_outroPageIdx)
+        ENDIF
+    ENDIF
+
+    charColor = GetCycleColor(INT(phase * 40.0) & 255)
+
+    FOR i = 0 TO g_outroLetterCount - 1
+        IF outroLetters[i].active = 1 THEN
+            DrawVectorCharShadow(pBuffer, screenW, screenH, _
+                                 outroLetters[i].charCode, _
+                                 INT(outroLetters[i].currentX) + 2, _
+                                 INT(outroLetters[i].currentY) + 2, _
+                                 scaleFX)
+
+            DrawVectorCharDirect(pBuffer, screenW, screenH, _
+                                 outroLetters[i].charCode, _
+                                 INT(outroLetters[i].currentX), _
+                                 INT(outroLetters[i].currentY), _
+                                 scaleFX, charColor)
+        ENDIF
+    NEXT i
+ENDSUB
+
+SUB InitCubeData()
+    cubeVerts[0] = -1.0 : cubeVerts[1] = -1.0 : cubeVerts[2] = -1.0
+    cubeVerts[3] =  1.0 : cubeVerts[4] = -1.0 : cubeVerts[5] = -1.0
+    cubeVerts[6] =  1.0 : cubeVerts[7] =  1.0 : cubeVerts[8] = -1.0
+    cubeVerts[9] = -1.0 : cubeVerts[10] = 1.0 : cubeVerts[11] = -1.0
+    cubeVerts[12] = -1.0 : cubeVerts[13] = -1.0 : cubeVerts[14] = 1.0
+    cubeVerts[15] =  1.0 : cubeVerts[16] = -1.0 : cubeVerts[17] = 1.0
+    cubeVerts[18] =  1.0 : cubeVerts[19] =  1.0 : cubeVerts[20] = 1.0
+    cubeVerts[21] = -1.0 : cubeVerts[22] =  1.0 : cubeVerts[23] = 1.0
+
+    cubeEdges[0] = 0 : cubeEdges[1] = 1
+    cubeEdges[2] = 1 : cubeEdges[3] = 2
+    cubeEdges[4] = 2 : cubeEdges[5] = 3
+    cubeEdges[6] = 3 : cubeEdges[7] = 0
+    cubeEdges[8] = 4 : cubeEdges[9] = 5
+    cubeEdges[10] = 5 : cubeEdges[11] = 6
+    cubeEdges[12] = 6 : cubeEdges[13] = 7
+    cubeEdges[14] = 7 : cubeEdges[15] = 4
+    cubeEdges[16] = 0 : cubeEdges[17] = 4
+    cubeEdges[18] = 1 : cubeEdges[19] = 5
+    cubeEdges[20] = 2 : cubeEdges[21] = 6
+    cubeEdges[22] = 3 : cubeEdges[23] = 7
+ENDSUB
+
+SUB InitMetaballsLUT()
+    INT dx, dy
+    FLOAT distSq, force
+    FOR dy = -191 TO 192
+        FOR dx = -191 TO 192
+            distSq = FLOAT(dx * dx + dy * dy)
+            IF distSq < 90000.0 THEN
+                force = 45000.0 / (distSq + 900.0)
+                metaballLUT[dx + 191, dy + 191] = INT(force)
+            ELSE
+                metaballLUT[dx + 191, dy + 191] = 0
+            ENDIF
+        NEXT dx
+    NEXT dy
+ENDSUB
+
+SUB InitEffectTechSpecs()
+    effectTechSpecs[0]  = "------------------------"
+    effectTechSpecs[1]  = "GRAPH KINEMATIC NETWORK"
+    effectTechSpecs[2]  = "INTERFEROMETRIC POLAR RINGS"
+    effectTechSpecs[3]  = "ROSE RHODONEA POLAR MATH"
+    effectTechSpecs[4]  = "3D EULER WIREFRAME MATRIX"
+    effectTechSpecs[5]  = "BALLISTIC PARTICLE EULER"
+    effectTechSpecs[6]  = "GOLDEN RATIO SPHERE GRID"
+    effectTechSpecs[7]  = "ROTATIONAL MATRIX SCALING"
+    effectTechSpecs[8]  = "TOROIDAL SURFACE MESH"
+    effectTechSpecs[9]  = "DISCRETE LAPLACIAN WAVE EQ"
+    effectTechSpecs[10] = "LIQUID METABALLS"
+    effectTechSpecs[11] = "TRIGONOMETRIC PLASMA FIELD"
+    effectTechSpecs[12] = "1 BY Z PERSPECTIVE TUNNEL"
+    effectTechSpecs[13] = "UNDULATING SURFACE MESH"
+    effectTechSpecs[14] = "HYPERSTARS TUNNEL WARP"
+    effectTechSpecs[15] = "INFERNAL WIREFRAME"
+    effectTechSpecs[16] = "METABALL + INTERFERENCE"
+    effectTechSpecs[17] = "ISOSURFACE LISSAJOUS BLOBS"
+    effectTechSpecs[18] = "MARKOV HAIKU GENERATOR"
+    effectTechSpecs[19] = "ABOUT THIS COMPO"
+    effectTechSpecs[20] = "ANALOG TV STATIC"
+ENDSUB
+
+SUB InitEffectNames()
+    effectNames[0]  = "m0xX presents"
+    effectNames[1]  = "gravity web"
+    effectNames[2]  = "moire interference"
+    effectNames[3]  = "super rose curve"
+    effectNames[4]  = "spinning 3d cube"
+    effectNames[5]  = "particle fireworks"
+    effectNames[6]  = "dotted 3d sphere"
+    effectNames[7]  = "vector rotozoom"
+    effectNames[8]  = "parametric 3d torus"
+    effectNames[9]  = "wave ripples"
+    effectNames[10] = "metaballs"
+    effectNames[11] = "organic retroplasma"
+    effectNames[12] = "3d perspective wormhole"
+    effectNames[13] = "3d undulating mesh grid"
+    effectNames[14] = "3d hyperstars tunnel"
+    effectNames[15] = "cellular automatons"
+    effectNames[16] = "metaballs moire matrix"
+    effectNames[17] = "bob snake"
+    effectNames[18] = "hallucinated AI haiku"
+    effectNames[19] = "fly-in sticker outro"
+    effectNames[20] = "hardware rdtsc noise prng"
+    
+    lastOverlayIdx = -1
+    bannerDropTimer = 0.0
+ENDSUB
+
+SUB ApplyTrailDecaySSE2(pBuffer:POINTER, numPix:INT, decayFactor:INT)
+    IF decayFactor < 0 THEN decayFactor = 0
+    IF decayFactor > 255 THEN decayFactor = 255
+    g_pAsmDst = pBuffer
+    g_asmCount = numPix >> 2
+    g_asmDecay = decayFactor
+    g_asmPixelColor = 0xFF000000
+
+    _asm
+        push edi
+        mov edi, [g_pAsmDst]
+        mov ecx, [g_asmCount]
+
+        test edi, edi
+        jz decay_exit
+        test ecx, ecx
+        jz decay_exit
+
+        mov eax, [g_asmDecay]
+        movd xmm3, eax
+        pshuflw xmm3, xmm3, 0
+        punpcklqdq xmm3, xmm3         ; factor in all 8 words
+        movd xmm5, [g_asmPixelColor]
+        pshufd xmm5, xmm5, 0          ; alpha byte forced to 0xFF
+        pxor xmm4, xmm4
+
+    decay_loop:
+        movdqu xmm0, [edi]
+        movdqa xmm1, xmm0
+        punpcklbw xmm0, xmm4          ; bytes -> words (low 2 pixels)
+        punpckhbw xmm1, xmm4          ; (high 2 pixels)
+        pmullw xmm0, xmm3
+        pmullw xmm1, xmm3
+        psrlw xmm0, 8
+        psrlw xmm1, 8
+        packuswb xmm0, xmm1
+        por xmm0, xmm5
+        movdqu [edi], xmm0
+        add edi, 16
+        dec ecx
+        jnz decay_loop
+
+    decay_exit:
+        pop edi
+    _endasm
+ENDSUB
+
+SUB InitFireEngine()
+    INT i, r, g, b
+
+    FOR i = 0 TO 255
+        IF i < 64 THEN
+            r = i * 4 : g = 0 : b = 0
+        ELSE IF i < 128 THEN
+            r = 255 : g = (i - 64) * 4 : b = 0
+        ELSE IF i < 192 THEN
+            r = 255 : g = 255 : b = (i - 128) * 4
+        ELSE
+            r = 255 : g = 255 : b = 255
+        ENDIF
+        firePalette[i] = 0xFF000000 | (r << 16) | (g << 8) | b
+    NEXT i
+
+    IF g_pFireBuffer <> NULL THEN FREEMEM g_pFireBuffer
+    ALLOCMEM(g_pFireBuffer, screenW * (screenH + 4), 1)
+    FastClearBuffer(g_pFireBuffer, screenW * (screenH + 4))
+ENDSUB
+
+SUB DrawFireEffectDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+    IF g_pFireBuffer = NULL THEN
+        InitFireEngine()
+        IF g_pFireBuffer = NULL THEN RETURN
+    ENDIF
+
+    INT x, y
+    INT heat, avgHeat, decay
+    INT fireW, fireH
+    POINTER pHeatBase, pPixel
+    POINTER pRowBelow1, pRowBelow2, pRowAbove
+
+    fireW = screenW
+    fireH = screenH
+
+    ' 1. SEED THE BOTTOM IGNITION LINE
+    pHeatBase = g_pFireBuffer + ((fireH - 152) * fireW)
+    FOR x = 44 TO (fireW - 48)
+        IF RAND(0, 100) > 25 THEN
+            *<CHAR>(pHeatBase + x) = RAND(190, 255)
+        ELSE
+            *<CHAR>(pHeatBase + x) = 0
+        ENDIF
+    NEXT x
+
+    ' 2. SIMULATE HEAT PROPAGATION & CONVECTIVE COOLING
+    ' Pre-calculate row pointers outside the X loop to avoid continuous additions
+    FOR y = 152 TO (fireH - 153)
+        pRowAbove   = g_pFireBuffer + ((y - 1) * fireW)
+        pRowBelow1  = g_pFireBuffer + ((y + 1) * fireW)
+        pRowBelow2  = g_pFireBuffer + ((y + 2) * fireW)
+
+        FOR x = 45 TO (fireW - 45)
+            ' Average neighbors below
+            avgHeat = *<CHAR>(pRowBelow1 + x - 1) + _
+                      *<CHAR>(pRowBelow1 + x) + _
+                      *<CHAR>(pRowBelow1 + x + 1) + _
+                      *<CHAR>(pRowBelow2 + x)
+
+            avgHeat = avgHeat >> 2
+
+            ' Fast pseudo-random decay (alternates between 0, 1, or 2 without calling RAND)
+            decay = (x + y) & 1
+
+            IF avgHeat > decay THEN
+                avgHeat = avgHeat - decay
+            ELSE
+                avgHeat = 0
+            ENDIF
+
+            ' Store updated heat in row above
+            *<CHAR>(pRowAbove + x) = avgHeat
+        NEXT x
+    NEXT y
+
+    ' 3. PALETTE LOOKUP & 2x2 PIXEL BLOCK RASTERIZATION
+    INT rowPitchBytes, nextRowOffsetBytes
+    rowPitchBytes = fireW * 4
+    nextRowOffsetBytes = rowPitchBytes
+
+    FOR y = 154 TO (fireH - 156) STEP 2
+        pHeatBase = g_pFireBuffer + (y * fireW + 44)
+        pPixel    = pBuffer + ((y * fireW + 44) * 4)
+
+        FOR x = 44 TO (fireW - 48) STEP 2
+            heat = *<CHAR>pHeatBase
+
+            IF heat > 4 THEN
+                INT pixelColor = firePalette[heat]
+
+                ' Fast 2x2 block blit to frame buffer
+                *<INT>pPixel = pixelColor
+                *<INT>(pPixel + 4) = pixelColor
+                *<INT>(pPixel + nextRowOffsetBytes) = pixelColor
+                *<INT>(pPixel + nextRowOffsetBytes + 4) = pixelColor
+            ENDIF
+
+            pHeatBase = pHeatBase + 2
+            pPixel    = pPixel + 8
+        NEXT x
+    NEXT y
+ENDSUB
+
+SUB InitWaveBuffers()
+    IF g_pWaveBuffer1 <> NULL THEN FREEMEM g_pWaveBuffer1
+    IF g_pWaveBuffer2 <> NULL THEN FREEMEM g_pWaveBuffer2
+
+    ALLOCMEM(g_pWaveBuffer1, screenW * screenH, 2)
+    ALLOCMEM(g_pWaveBuffer2, screenW * screenH, 2)
+
+    FastClearBuffer(g_pWaveBuffer1, screenW * screenH * 2)
+    FastClearBuffer(g_pWaveBuffer2, screenW * screenH * 2)
+
+    g_activeWaveBuf = 0
+    g_waveTransformTimer = 0.0
+ENDSUB
+
+SUB InjectWaveDrop(pBuf:POINTER, bufW:INT, bufH:INT, dropX:INT, dropY:INT, radius:INT, force:INT)
+    INT x, y, dx, dy, distSq, radSq
+    POINTER pPtr
+
+    radSq = radius * radius
+    FOR dy = -radius TO radius
+        y = dropY + dy
+        IF y > 155 AND y < (bufH - 155) THEN
+            FOR dx = -radius TO radius
+                x = dropX + dx
+                IF x > 45 AND x < (bufW - 45) THEN
+                    distSq = dx * dx + dy * dy
+                    IF distSq <= radSq THEN
+                        pPtr = pBuf + ((y * bufW + x) * 2)
+                        *<WORD>pPtr = force
+                    ENDIF
+                ENDIF
+            NEXT dx
+        ENDIF
+    NEXT dy
+ENDSUB
+
+SUB ProcessWaveSimulation(pSrcBuf:POINTER, pDstBuf:POINTER, bufW:INT, bufH:INT)
+    INT x, y, nVal
+    POINTER pCurr, pDst
+    
+    FOR y = 152 TO (bufH - 152)
+        pCurr = pSrcBuf + ((y * bufW + 45) * 2)
+        pDst  = pDstBuf + ((y * bufW + 45) * 2)
+        
+        FOR x = 45 TO (bufW - 45)
+            nVal = (*<WORD>(pCurr - 2) + *<WORD>(pCurr + 2) + *<WORD>(pCurr - bufW * 2) + *<WORD>(pCurr + bufW * 2)) >> 1
+            nVal = nVal - *<WORD>pDst
+            nVal = nVal - (nVal >> 5)
+            
+            IF nVal < 0 THEN nVal = 0
+            IF nVal > 2048 THEN nVal = 2048
+            
+            *<WORD>pDst = nVal
+            
+            pCurr = pCurr + 2
+            pDst  = pDst + 2
+        NEXT x
+    NEXT y
+ENDSUB
+
+SUB RenderWaveHeightMap(pHeightBuf:POINTER, pPixelBuf:POINTER, screenW:INT, screenH:INT, penColor:INT)
+    INT x, y, waveHeight, colorIdx, finalColor
+    POINTER pHeight, pPixel
+
+    FOR y = 152 TO (screenH - 152) STEP 2
+        pHeight = pHeightBuf + ((y * screenW + 45) * 2)
+        pPixel  = pPixelBuf  + ((y * screenW + 45) * 4)
+
+        FOR x = 45 TO (screenW - 45) STEP 2
+            waveHeight = *<WORD>pHeight
+
+            IF waveHeight > 8 THEN
+                colorIdx = ((waveHeight >> 2) + INT(phase * 30.0)) & 255
+                finalColor = GetCycleColor(colorIdx)
+
+                *<INT>pPixel = finalColor
+                *<INT>(pPixel + 4) = finalColor
+                *<INT>(pPixel + (screenW * 4)) = finalColor
+                *<INT>(pPixel + (screenW * 4) + 4) = finalColor
+            ENDIF
+
+            pHeight = pHeight + 4
+            pPixel  = pPixel + 8
+        NEXT x
+    NEXT y
+ENDSUB
+
+SUB DrawDottedWormholeDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+    INT ring, dot
+    INT colorIdx, pixelColor, baseAngleIdx
+    FLOAT radius, zDepth, speed, camX, camY
+    FLOAT bendX, bendY
+    INT ringCx, ringCy, intRadius
+    INT dotX, dotY, angleIdx
+
+    camX = SIN(phase * 1.2) * 20.0
+    camY = COS(phase * 0.9) * 15.0
+    
+    ' --- BEAT PULSE MODULATION ---
+    speed = phase * (18.0 + (g_beatPulse * 16.0))
+
+    FOR ring = 0 TO 27
+        zDepth = 260.0 - (FLOAT(ring * 9) + speed)
+        
+        WHILE zDepth < 10.0
+            zDepth = zDepth + 250.0
+        ENDWHILE
+        WHILE zDepth > 260.0
+            zDepth = zDepth - 250.0
+        ENDWHILE
+
+        radius = 18000.0 / zDepth
+        intRadius = INT(radius)
+
+        bendX = SIN((phase * 1.5) + (zDepth * 0.015)) * (zDepth * 0.35)
+        bendY = COS((phase * 1.1) + (zDepth * 0.018)) * (zDepth * 0.25)
+
+        ringCx = INT(FLOAT(screenW / 2) + camX + bendX)
+        ringCy = INT(FLOAT(screenH / 2) + camY + bendY)
+        
+        baseAngleIdx = INT(((phase * 0.8) + (zDepth * 0.02)) * 40.7436) & 255
+        colorIdx = (INT(zDepth * 0.8) + INT(phase * 45.0)) & 255
+        pixelColor = GetCycleColor(colorIdx)
+
+        FOR dot = 0 TO 31
+            angleIdx = (baseAngleIdx + (dot * 8)) & 255
+            
+            dotX = ringCx + ((cosTable[angleIdx] * intRadius) >> 16)
+            dotY = ringCy + ((sinTable[angleIdx] * intRadius) >> 16)
+
+            IF dotX >= 44 AND (dotX + 3) < (screenW - 48) THEN
+                IF dotY >= 156 AND (dotY + 3) < (screenH - 160) THEN
+                    g_pAsmPixel = pBuffer + ((dotY * screenW + dotX) * 4)
+                    g_asmPixelColor = pixelColor
+                    g_asmCount = screenW * 4
+
+                    _asm
+                        push edi
+                        mov edi, [g_pAsmPixel]
+                        mov eax, [g_asmPixelColor]
+                        mov edx, [g_asmCount]
+
+                        mov [edi], eax
+                        mov [edi+4], eax
+                        mov [edi+8], eax
+                        mov [edi+12], eax
+
+                        add edi, edx
+                        mov [edi], eax
+                        mov [edi+4], eax
+                        mov [edi+8], eax
+                        mov [edi+12], eax
+
+                        add edi, edx
+                        mov [edi], eax
+                        mov [edi+4], eax
+                        mov [edi+8], eax
+                        mov [edi+12], eax
+
+                        add edi, edx
+                        mov [edi], eax
+                        mov [edi+4], eax
+                        mov [edi+8], eax
+                        mov [edi+12], eax
+
+                        pop edi
+                    _endasm
+                ENDIF
+            ENDIF
+        NEXT dot
+    NEXT ring
+ENDSUB
+
+SUB DrawMetaballsEffectDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+    INT x, y, i
+    INT sumForce, colorIdx, pixelColor
+    INT mbXi[4], mbYi[4]
+
+    mbXi[0] = INT((screenW / 2) + SIN(phase * 1.1) * 200.0)
+    mbYi[0] = INT((screenH / 2) + COS(phase * 0.8) * 70.0)
+    mbXi[1] = INT((screenW / 2) + COS(phase * 1.3) * 220.0)
+    mbYi[1] = INT((screenH / 2) + SIN(phase * 1.0) * 80.0)
+    mbXi[2] = INT((screenW / 2) + SIN(phase * 0.7 + 1.5) * 170.0)
+    mbYi[2] = INT((screenH / 2) + COS(phase * 1.2 + 0.8) * 75.0)
+    mbXi[3] = INT((screenW / 2) + COS(phase * 1.0 + 2.1) * 190.0)
+    mbYi[3] = INT((screenH / 2) + SIN(phase * 1.5 + 1.2) * 65.0)
+
+    FOR y = 156 TO (screenH - 160) STEP 4
+        FOR x = 44 TO (screenW - 48) STEP 4
+            sumForce = 0
+
+            FOR i = 0 TO 3
+                INT rX = x - mbXi[i] + 191
+                INT rY = y - mbYi[i] + 191
+                IF rX >= 0 AND rX < 384 AND rY >= 0 AND rY < 384 THEN
+                    sumForce = sumForce + metaballLUT[rX, rY]
+                ENDIF
+            NEXT i
+
+            IF sumForce >= 25 THEN
+                colorIdx = (sumForce * 4 + INT(phase * 45.0)) & 255
+                pixelColor = GetCycleColor(colorIdx)
+
+                g_pAsmPixel = pBuffer + ((y * screenW + x) * 4)
+                g_asmPixelColor = pixelColor
+                g_asmCount = screenW * 4
+
+                _asm
+                    push edi
+                    mov edi, [g_pAsmPixel]
+                    mov eax, [g_asmPixelColor]
+                    mov edx, [g_asmCount]
+
+                    mov [edi], eax
+                    mov [edi+4], eax
+                    mov [edi+8], eax
+                    mov [edi+12], eax
+
+                    add edi, edx
+                    mov [edi], eax
+                    mov [edi+4], eax
+                    mov [edi+8], eax
+                    mov [edi+12], eax
+
+                    add edi, edx
+                    mov [edi], eax
+                    mov [edi+4], eax
+                    mov [edi+8], eax
+                    mov [edi+12], eax
+
+                    add edi, edx
+                    mov [edi], eax
+                    mov [edi+4], eax
+                    mov [edi+8], eax
+                    mov [edi+12], eax
+
+                    pop edi
+                _endasm
+            ENDIF
+        NEXT x
+    NEXT y
+ENDSUB
+
+SUB DrawPlasmaEffectDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+    IF pBuffer = NULL THEN RETURN
+
+    INT x, y
+    INT colorIdx, pixelColor, calcWave
+    INT phaseOff1, phaseOff2, phaseOff3
+    INT cosTableY, yRowOffset, pitchBytes
+
+
+    phaseOff1 = INT(phase * 40.0) & 255
+    phaseOff2 = INT(phase * 25.0) & 255
+    phaseOff3 = INT(phase * 15.0) & 255
+
+    pitchBytes = screenW * 4
+    g_asmPitch = pitchBytes
+
+    FOR y = 156 TO (screenH - 160) STEP 4
+        cosTableY  = cosTable[(y + phaseOff2) & 255] >> 10
+        yRowOffset = y * screenW
+
+        FOR x = 44 TO (screenW - 48) STEP 4
+            calcWave = (sinTable[(x + phaseOff1) & 255] >> 10) + _
+                       cosTableY + _
+                       (sinTable[(x + y + phaseOff3) & 255] >> 10)
+
+            colorIdx = (calcWave + phaseOff1) & 255
+            pixelColor = GetCycleColor(colorIdx)
+
+            g_asmPixel = pBuffer + ((yRowOffset + x) * 4)
+            g_asmColor = pixelColor
+
+            _asm
+                push edi
+                push eax
+                push edx
+
+                mov edi, [g_asmPixel]
+                mov eax, [g_asmColor]
+                mov edx, [g_asmPitch]
+
+                ; Row 0
+                mov [edi], eax
+                mov [edi+4], eax
+                mov [edi+8], eax
+                mov [edi+12], eax
+
+                ; Row 1
+                add edi, edx
+                mov [edi], eax
+                mov [edi+4], eax
+                mov [edi+8], eax
+                mov [edi+12], eax
+
+                ; Row 2
+                add edi, edx
+                mov [edi], eax
+                mov [edi+4], eax
+                mov [edi+8], eax
+                mov [edi+12], eax
+
+                ; Row 3
+                add edi, edx
+                mov [edi], eax
+                mov [edi+4], eax
+                mov [edi+8], eax
+                mov [edi+12], eax
+
+                pop edx
+                pop eax
+                pop edi
+            _endasm
+        NEXT x
+    NEXT y
+ENDSUB
+
+SUB DrawRasterbarsEffectDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+    DEF i, j, y, barY:INT
+    DEF offset, intensity, highlight:FLOAT
+    DEF cr, cg, cb:INT
+    INT baseR, baseG, baseB
+    INT barColors[29]
+
+    INT rPalette[6]
+    INT gPalette[6]
+    INT bPalette[6]
+
+    rPalette[0] = 255: gPalette[0] = 200: bPalette[0] = 0
+    rPalette[1] = 227: gPalette[1] = 40:  bPalette[1] = 40
+    rPalette[2] = 40:  gPalette[2] = 210: bPalette[2] = 80
+    rPalette[3] = 0:   gPalette[3] = 180: bPalette[3] = 255
+    rPalette[4] = 230: gPalette[4] = 20:  bPalette[4] = 200
+    rPalette[5] = 255: gPalette[5] = 100: bPalette[5] = 0
+
+    FLOAT bounceAmp = 120.0
+
+    FOR i = 0 TO 5
+        offset = phase + (FLOAT(i) * 0.28)
+        barY = (screenH / 2) + INT(SIN(offset) * bounceAmp)
+
+        baseR = rPalette[i]
+        baseG = gPalette[i]
+        baseB = bPalette[i]
+
+        FOR j = -14 TO 14
+            intensity = 1.0 - (ABS(FLOAT(j)) / 14.5)
+            IF intensity < 0.05 THEN intensity = 0.05
+            intensity = intensity * intensity
+
+            intensity = intensity * (1.0 + (g_beatPulse * 0.30))
+
+            cr = INT(FLOAT(baseR) * intensity)
+            cg = INT(FLOAT(baseG) * intensity)
+            cb = INT(FLOAT(baseB) * intensity)
+
+            highlight = 1.0 - (ABS(FLOAT(j)) / 8.0)
+            IF highlight > 0.0 THEN
+                highlight = highlight * highlight
+                cr = cr + INT((255.0 - FLOAT(cr)) * highlight * 0.85)
+                cg = cg + INT((255.0 - FLOAT(cg)) * highlight * 0.85)
+                cb = cb + INT((255.0 - FLOAT(cb)) * highlight * 0.85)
+            ENDIF
+
+            IF ((j + 14) % 2) = 1 THEN
+                cr = INT(FLOAT(cr) * 0.82) + 25
+                cg = INT(FLOAT(cg) * 0.82) + 25
+                cb = INT(FLOAT(cb) * 0.82) + 25
+            ENDIF
+
+            IF cr > 255 THEN cr = 255
+            IF cg > 255 THEN cg = 255
+            IF cb > 255 THEN cb = 255
+
+            barColors[j + 14] = 0xFF000000 | (cr << 16) | (cg << 8) | cb
+        NEXT j
+
+        FOR j = -14 TO 14
+            y = barY + j
+
+            IF y >= 151 AND y < (screenH - 151) THEN
+                g_pAsmPixel = pBuffer + (y * screenW * 4)
+                g_asmLinePixelColor = barColors[j + 14]
+                g_asmCount = screenW
+
+                _asm
+                    push edi
+                    mov edi, [g_pAsmPixel]
+                    mov eax, [g_asmLinePixelColor]
+                    mov ecx, [g_asmCount]
+                    rep stosd
+                    pop edi
+                _endasm
+            ENDIF
+        NEXT j
+    NEXT i
+ENDSUB
+
+SUB UpdateAndDrawStarfieldDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+    INT i, px, py, lineY
+    POINTER pPixel
+
+    g_pAsmPixel = pBuffer
+    g_asmCount = 148 * screenW
+
+    _asm
+        push edi
+        mov edi, [g_pAsmPixel]
+        mov ecx, [g_asmCount]
+        xor eax, eax
+        rep stosd
+        pop edi
+    _endasm
+
+    lineY = screenH - 147
+    IF lineY >= 0 AND lineY < screenH THEN
+        g_pAsmPixel = pBuffer + (lineY * screenW * 4)
+        g_asmCount = 147 * screenW
+
+        _asm
+            push edi
+            mov edi, [g_pAsmPixel]
+            mov ecx, [g_asmCount]
+            xor eax, eax
+            rep stosd
+            pop edi
+        _endasm
+    ENDIF
+
+    FOR i = 0 TO 149
+        IF i < 75 THEN
+            starX[i] = starX[i] - INT(starDX[i])
+            IF starX[i] < 0 THEN 
+                starX[i] = screenW - 1
+                starY[i] = RAND(1, 140)
+            ENDIF
+            px = starX[i]
+            py = starY[i]
+        ELSE
+            starX[i] = starX[i] + INT(starDX[i])
+            IF starX[i] >= screenW THEN 
+                starX[i] = 0
+                starY[i] = RAND(1, 140)
+            ENDIF
+            px = starX[i]
+            py = (screenH - 146) + starY[i]
+        ENDIF
+        
+        IF px >= 0 AND px < screenW AND py >= 0 AND py < screenH THEN
+            pPixel = pBuffer + ((py * screenW + px) * 4)
+            *<INT>pPixel = 0xFFFFFFFF
+        ENDIF
+    NEXT i
+
+	 ' Top and bottom viewport thick yellow bars
+    ' g_asmLinePixelColor = 0xFFFFFF00
+
+    g_pAsmPixel = pBuffer + (148 * screenW * 4)
+    g_asmCount = 3 * screenW
+    _asm
+        push edi
+        mov edi, [g_pAsmPixel]
+        mov eax, [g_asmLinePixelColor]
+        mov ecx, [g_asmCount]
+        rep stosd
+        pop edi
+    _endasm
+
+    lineY = screenH - 150
+    IF lineY >= 0 AND lineY < screenH THEN
+        g_pAsmPixel = pBuffer + (lineY * screenW * 4)
+        g_asmCount = 3 * screenW
+        _asm
+            push edi
+            mov edi, [g_pAsmPixel]
+            mov eax, [g_asmLinePixelColor]
+            mov ecx, [g_asmCount]
+            rep stosd
+            pop edi
+        _endasm
+    ENDIF
+ENDSUB
+
+SUB DrawDottedSphereDirect(pBuffer:POINTER, screenW:INT, screenH:INT, penColor:INT)
+    DEF i, qx, qy:INT
+    INT centerX, leftX, rightX, sideOffset, screenX, screenY, colorIdx, pixelColor
+    FLOAT u, v, x, y, z, xy, scale, projX, projY
+    FLOAT rx1, ry1, rx2, ry2, rx3, ry3
+    FLOAT tx, ty, tz
+    POINTER pPixel
+
+    ' Independent rotations for each sphere
+    rotX = rotX + 0.03 : rotY = rotY + 0.04
+    rx1 = rotX : ry1 = rotY
+    rx2 = -rotX * 1.2 : ry2 = rotY * 1.5
+    rx3 = rotX * 0.5 : ry3 = -rotY * 0.8
+
+    sideOffset = (screenW * 35) / 100
+    centerX = screenW / 2
+    leftX   = centerX - sideOffset
+    rightX  = centerX + sideOffset
+    scale   = 110.0
+
+    FOR i = 0 TO 99
+        v = FLOAT(i) * 0.0314 : u = FLOAT(i) * 0.618
+        tx = SIN(u) * COS(v) : ty = SIN(u) * SIN(v) : tz = COS(u)
+        colorIdx = (i + INT(phase * 40.0)) % 256
+
+        ' Left Sphere
+        x = tx : y = ty : z = tz
+        xy = y * COS(rx1) - z * SIN(rx1) : z = y * SIN(rx1) + z * COS(rx1) : y = xy
+        xy = x * COS(ry1) + z * SIN(ry1) : z = -x * SIN(ry1) + z * COS(ry1) : x = xy
+        projX = x * scale : projY = y * scale
+        screenY = INT(projY) + (screenH / 2) : screenX = INT(projX) + leftX
+        IF screenX >= 0 AND (screenX + 3) < screenW AND screenY >= 156 AND (screenY + 3) < (screenH - 160) THEN
+            pixelColor = GetCycleColor(colorIdx % 256)
+            FOR qy = 0 TO 3
+                pPixel = pBuffer + (((screenY + qy) * screenW + screenX) * 4)
+                FOR qx = 0 TO 3 : *<INT>(pPixel + (qx * 4)) = pixelColor : NEXT qx
+            NEXT qy
+        ENDIF
+
+        ' Center Sphere
+        x = tx : y = ty : z = tz
+        xy = y * COS(rx2) - z * SIN(rx2) : z = y * SIN(rx2) + z * COS(rx2) : y = xy
+        xy = x * COS(ry2) + z * SIN(ry2) : z = -x * SIN(ry2) + z * COS(ry2) : x = xy
+        projX = x * scale : projY = y * scale
+        screenY = INT(projY) + (screenH / 2) : screenX = INT(projX) + centerX
+        IF screenX >= 0 AND (screenX + 3) < screenW AND screenY >= 156 AND (screenY + 3) < (screenH - 160) THEN
+            pixelColor = GetCycleColor((colorIdx + 85) % 256)
+            FOR qy = 0 TO 3
+                pPixel = pBuffer + (((screenY + qy) * screenW + screenX) * 4)
+                FOR qx = 0 TO 3 : *<INT>(pPixel + (qx * 4)) = pixelColor : NEXT qx
+            NEXT qy
+        ENDIF
+
+        ' Right Sphere
+        x = tx : y = ty : z = tz
+        xy = y * COS(rx3) - z * SIN(rx3) : z = y * SIN(rx3) + z * COS(rx3) : y = xy
+        xy = x * COS(ry3) + z * SIN(ry3) : z = -x * SIN(ry3) + z * COS(ry3) : x = xy
+        projX = x * scale : projY = y * scale
+        screenY = INT(projY) + (screenH / 2) : screenX = INT(projX) + rightX
+        IF screenX >= 0 AND (screenX + 3) < screenW AND screenY >= 156 AND (screenY + 3) < (screenH - 160) THEN
+            pixelColor = GetCycleColor((colorIdx + 170) % 256)
+            FOR qy = 0 TO 3
+                pPixel = pBuffer + (((screenY + qy) * screenW + screenX) * 4)
+                FOR qx = 0 TO 3 : *<INT>(pPixel + (qx * 4)) = pixelColor : NEXT qx
+            NEXT qy
+        ENDIF
+    NEXT i
+ENDSUB
+
+
+SUB Draw3DTorusDirect(pBuffer:POINTER, screenW:INT, screenH:INT, penColor:INT)
+    DEF i, qx, qy:INT
+    INT centerX, leftX, rightX, sideOffset
+    INT screenX, screenY, colorIdx, pixelColor
+    FLOAT u, v, x, y, z, xy
+    FLOAT torusR1, torusR2
+    FLOAT rx1, ry1, rx2, ry2, rx3, ry3
+    FLOAT tx, ty, tz
+    POINTER pPixel
+
+    ' Update global rotation (used as the engine-wide base)
+    rotX = rotX + 0.03
+    rotY = rotY + 0.02
+
+    ' Calculate unique rotation angles for each torus using multipliers and inversions
+    rx1 = rotX : ry1 = rotY
+    rx2 = -rotX * 1.3 : ry2 = rotY * 1.1
+    rx3 = rotX * 0.7 : ry3 = -rotY * 1.5
+
+    ' Proportional layout spacing
+    sideOffset = (screenW * 35) / 100
+    centerX = screenW / 2
+    leftX   = centerX - sideOffset
+    rightX  = centerX + sideOffset
+
+    torusR1 = 95.0
+    torusR2 = 38.0
+
+    FOR i = 0 TO 199
+        u = FLOAT(i % 20) * 0.314159
+        v = FLOAT(i / 20) * 0.628318
+
+        ' Pre-calculate parametric object-space coordinates
+        tx = (torusR1 + torusR2 * COS(v)) * COS(u)
+        ty = (torusR1 + torusR2 * COS(v)) * SIN(u)
+        tz = torusR2 * SIN(v)
+
+        colorIdx = (i + INT(phase * 40.0)) % 256
+
+        ' --- RENDER LEFT TORUS (Direction A) ---
+        x = tx : y = ty : z = tz
+        xy = y * COS(rx1) - z * SIN(rx1) : z = y * SIN(rx1) + z * COS(rx1) : y = xy
+        xy = x * COS(ry1) + z * SIN(ry1) : x = xy
+        screenY = INT(y) + (screenH / 2)
+        screenX = INT(x) + leftX
+        IF screenX >= 0 AND (screenX + 3) < screenW AND screenY >= 156 AND (screenY + 3) < (screenH - 160) THEN
+            pixelColor = GetCycleColor(colorIdx % 256)
+            FOR qy = 0 TO 3
+                pPixel = pBuffer + (((screenY + qy) * screenW + screenX) * 4)
+                FOR qx = 0 TO 3 : *<INT>(pPixel + (qx * 4)) = pixelColor : NEXT qx
+            NEXT qy
+        ENDIF
+
+        ' --- RENDER CENTER TORUS (Direction B - Inverse/Fast) ---
+        x = tx : y = ty : z = tz
+        xy = y * COS(rx2) - z * SIN(rx2) : z = y * SIN(rx2) + z * COS(rx2) : y = xy
+        xy = x * COS(ry2) + z * SIN(ry2) : x = xy
+        screenY = INT(y) + (screenH / 2)
+        screenX = INT(x) + centerX
+        IF screenX >= 0 AND (screenX + 3) < screenW AND screenY >= 156 AND (screenY + 3) < (screenH - 160) THEN
+            pixelColor = GetCycleColor((colorIdx + 85) % 256)
+            FOR qy = 0 TO 3
+                pPixel = pBuffer + (((screenY + qy) * screenW + screenX) * 4)
+                FOR qx = 0 TO 3 : *<INT>(pPixel + (qx * 4)) = pixelColor : NEXT qx
+            NEXT qy
+        ENDIF
+
+        ' --- RENDER RIGHT TORUS (Direction C - Slow/Inverse Y) ---
+        x = tx : y = ty : z = tz
+        xy = y * COS(rx3) - z * SIN(rx3) : z = y * SIN(rx3) + z * COS(rx3) : y = xy
+        xy = x * COS(ry3) + z * SIN(ry3) : x = xy
+        screenY = INT(y) + (screenH / 2)
+        screenX = INT(x) + rightX
+        IF screenX >= 0 AND (screenX + 3) < screenW AND screenY >= 156 AND (screenY + 3) < (screenH - 160) THEN
+            pixelColor = GetCycleColor((colorIdx + 170) % 256)
+            FOR qy = 0 TO 3
+                pPixel = pBuffer + (((screenY + qy) * screenW + screenX) * 4)
+                FOR qx = 0 TO 3 : *<INT>(pPixel + (qx * 4)) = pixelColor : NEXT qx
+            NEXT qy
+        ENDIF
+    NEXT i
+ENDSUB
+
+
+SUB InitGraphics()
+    IF hMemDC <> 0 THEN
+        SelectObject(hMemDC, hOldBmp)
+        DeleteObject(hMemBmp)
+        DeleteDC(hMemDC)
+    ENDIF
+
+    IF hWindowDC <> 0 THEN ReleaseDC(main_win.hwnd, hWindowDC)
+    hWindowDC = GetDC(main_win.hwnd)
+    SetStretchBltMode(hWindowDC, 3)          ' COLORONCOLOR
+    ComputeBlitRect()
+    IF g_needScale = 1 THEN PatBlt(hWindowDC, 0, 0, g_winW, g_winH, 0x00000042)     ' BLACKNESS: paints the letterbox bars
+
+    hMemDC = CreateCompatibleDC(hWindowDC)
+    
+    bmpInfo.biSize = 40
+    bmpInfo.biWidth = screenW
+    bmpInfo.biHeight = -screenH
+    bmpInfo.biPlanes = 1
+    bmpInfo.biBitCount = 32
+    bmpInfo.biCompression = 0
+
+    hMemBmp = CreateDIBSection(hMemDC, &bmpInfo, 0, &pPixelBuffer, 0, 0)
+    hOldBmp = SelectObject(hMemDC, hMemBmp)
+
+   IF hPostDC <> 0 THEN
+       SelectObject(hPostDC, hOldPostBmp)
+       DeleteObject(hPostBmp)
+       DeleteDC(hPostDC)
+   ENDIF
+   hPostDC = CreateCompatibleDC(hWindowDC)
+   hPostBmp = CreateDIBSection(hPostDC, &bmpInfo, 0, &pPostBuffer, 0, 0)
+   hOldPostBmp = SelectObject(hPostDC, hPostBmp)
+
+    ' Initialize these right after allocating/creating your DIB Section:
+    g_bufferByteSize = screenW * screenH * 4
+    g_bufferDwordCount = screenW * screenH    
+
+    IF pCopperBuffer <> 0 THEN FREEMEM pCopperBuffer
+    ALLOCMEM(pCopperBuffer, screenW * screenH, 4)
+
+    IF pTrailBuffer <> 0 THEN FREEMEM pTrailBuffer
+    ALLOCMEM(pTrailBuffer, screenW * screenH, 4)
+    FastClearBuffer(pTrailBuffer, screenW * screenH * 4)
+
+    ' Transition Buffer
+    IF pTransitionBuffer <> 0 THEN FREEMEM pTransitionBuffer
+    ALLOCMEM(pTransitionBuffer, screenW * screenH, 4)
+    FastClearBuffer(pTransitionBuffer, screenW * screenH * 4)
+
+    ' Safe Guard-Banded HyperStars Layer Buffer Allocation
+    IF g_pHyperStarsLayer <> 0 THEN FREEMEM g_pHyperStarsLayer
+    ALLOCMEM(g_pHyperStarsLayer, screenW * (screenH + 4), 4)
+    FastClearBuffer(g_pHyperStarsLayer, screenW * (screenH + 4) * 4)
+ENDSUB
+
+SUB FastClearBuffer(pBuf:POINTER, nBytes:INT)
+    g_pAsmDst = pBuf
+    g_asmNumBytes = nBytes
+
+    _asm
+        push edi
+        mov edi, [g_pAsmDst]
+        mov ecx, [g_asmNumBytes]
+        shr ecx, 2
+        xor eax, eax
+        rep stosd
+        pop edi
+    _endasm
+ENDSUB
+
+SUB AdditiveBlendASM(pTargetBuf:POINTER, pSrcBuf:POINTER, numPix:INT)
+    g_pAsmDst = pTargetBuf
+    g_pAsmSrc = pSrcBuf
+    g_asmCount = numPix >> 2
+    g_asmPixelColor = 0x00FFFFFF
+
+    _asm
+        push esi
+        push edi
+
+        mov edi, [g_pAsmDst]
+        mov esi, [g_pAsmSrc]
+        mov ecx, [g_asmCount]
+
+        test edi, edi
+        jz blend_exit
+        test esi, esi
+        jz blend_exit
+        test ecx, ecx
+        jz blend_exit
+
+        movd xmm2, [g_asmPixelColor]
+        pshufd xmm2, xmm2, 0
+
+    blend_loop:
+        movdqu xmm0, [edi]
+        movdqu xmm1, [esi]
+
+        pand xmm0, xmm2
+        pand xmm1, xmm2
+
+        paddusb xmm0, xmm1
+
+        movdqu [edi], xmm0
+
+        add edi, 16
+        add esi, 16
+        dec ecx
+        jnz blend_loop
+
+    blend_exit:
+        pop edi
+        pop esi
+    _endasm
+ENDSUB
+
+SUB DrawBuffered()
+    IF pPixelBuffer = 0 OR pCopperBuffer = 0 THEN RETURN
+
+    ' 1. Update Beat Envelope
+    UpdateAudioPulse()
+
+    phase = phase + 0.06 
+
+    ' Retain phase values between frame calls
+    STATIC double gadd, gadd2
+    gadd = phase * 2.5          ' Advance primary wave angle
+    gadd2 = phase * 1.3         ' Advance secondary wave angle
+
+	 ' Generate haiku once upon entering target overlay modes (10 or 17)
+    IF (current_overlay = 10 OR current_overlay = 17) THEN
+        IF g_HaikuGenerated = 0 THEN
+            g_HaikuLine1 = BuildHaikuLine(5)
+            g_HaikuLine2 = BuildHaikuLine(7)
+            g_HaikuLine3 = BuildHaikuLine(5)
+            g_HaikuGenerated = 1  ' Lock state across frames
+        ENDIF
+    ELSE
+        ' Reset the lock flag ONLY when leaving the haiku overlays
+        g_HaikuGenerated = 0
+    ENDIF
+    frame_count = frame_count + 1
+    IF frame_count >= 456 THEN
+        frame_count = 0
+
+        ' 1. Snapshot current rendered screen into pTransitionBuffer (Fast x86 inline copy)
+        FastCopyBuffer(pTransitionBuffer, pPixelBuffer, g_bufferDwordCount)
+
+        ' 2. Begin Transition State
+        g_isTransitioning = 1
+        g_transitionFrame = 0
+
+        ' 3. Advance to next overlay
+        current_overlay = (current_overlay + 1) % 21
+        g_overlayEpoch = g_overlayEpoch + 1
+    ENDIF
+
+    ' --- 1. TRAIL DECAY PASS ---
+    SELECT current_overlay
+        CASE 2:  ' Moiré interference
+            ApplyTrailDecaySSE2(pPixelBuffer, screenW * screenH, 200)
+        CASE 3:  ' Super Rose Curve
+            ApplyTrailDecaySSE2(pPixelBuffer, screenW * screenH, 215)
+        CASE 4:  ' Spinning Cube
+            ApplyTrailDecaySSE2(pPixelBuffer, screenW * screenH, 192)
+        CASE 5:  ' Fireworks
+            ApplyTrailDecaySSE2(pPixelBuffer, screenW * screenH, 215)
+        CASE 6:  ' Dotted Sphere
+            ApplyTrailDecaySSE2(pPixelBuffer, screenW * screenH, 160)
+        CASE 7:  ' 3D Torus
+            ApplyTrailDecaySSE2(pPixelBuffer, screenW * screenH, 160)
+        CASE 8:  ' Rotozoom
+            ApplyTrailDecaySSE2(pPixelBuffer, screenW * screenH, 110)
+        CASE 10: ' Metaballs
+            ApplyTrailDecaySSE2(pPixelBuffer, screenW * screenH, 185)
+        CASE 12: ' Wormhole
+            ApplyTrailDecaySSE2(pPixelBuffer, screenW * screenH, 110)
+        CASE 15: ' Infernal Wireframe
+            ApplyTrailDecaySSE2(pPixelBuffer, screenW * screenH, 215)
+        CASE 16: ' Metaball Moiré Interference
+            ApplyTrailDecaySSE2(pPixelBuffer, screenW * screenH, 185)
+        CASE 17: ' Lissajous Bob Snake
+            ApplyTrailDecaySSE2(pPixelBuffer, screenW * screenH, 160)
+        CASE 18: ' Markov Haïku Generator
+            ApplyTrailDecaySSE2(pPixelBuffer, screenW * screenH, 185)
+        DEFAULT:
+            FastClearBuffer(pPixelBuffer, screenW * screenH * 4)
+            FastClearBuffer(pCopperBuffer, screenW * screenH * 4)
+    ENDSELECT
+
+    INT dynamicColor = GetCycleColor(INT(phase * 40.0) & 255)
+
+    ' --- 2. EFFECT RENDERING PASS ---
+    SELECT current_overlay
+        CASE 0:  ' [0] Rasterbar Pixel Art Logo Composite
+            DrawRasterbarLogoComposite(pPixelBuffer, screenW, screenH)
+        CASE 1:  ' [1] Gravity Web
+            DrawGravityWebDirect(pPixelBuffer, screenW, screenH, dynamicColor)
+        CASE 2:  ' [2] Moiré Interference
+            DrawMoireInterferenceDirect(pPixelBuffer, screenW, screenH, dynamicColor)
+        CASE 3:  ' [3] Super Rose Curve
+            DrawSuperRoseCurveDirect(pPixelBuffer, screenW, screenH, dynamicColor)
+        CASE 4:  ' [4] Spinning Cube
+            DrawSpinningCubeDirect(pPixelBuffer, screenW, screenH, dynamicColor)
+        CASE 5:  ' [5] Fireworks
+            DrawFireworksDirect(pPixelBuffer, screenW, screenH)
+            DrawCubeEffectDirectTransparent4X(pPixelBuffer, screenW, screenH)
+        CASE 6:  ' [6] Dotted Sphere
+            DrawDottedSphereDirect(pPixelBuffer, screenW, screenH, dynamicColor)
+        CASE 7:  ' [7] Rotozoom
+            DrawRotozoomDirect(pPixelBuffer, screenW, screenH)
+        CASE 8:  ' [8] 3D Torus
+            Draw3DTorusDirect(pPixelBuffer, screenW, screenH, dynamicColor)
+        CASE 9:  ' [9] Wave Ripples
+            DrawWaveRipplesDirect(pPixelBuffer, screenW, screenH, dynamicColor)
+        CASE 10: ' [10] Metaballs
+            DrawMetaballsEffectDirect(pPixelBuffer, screenW, screenH)
+        CASE 11: ' [11] Plasma Effect
+            DrawPlasmaEffectDirect(pPixelBuffer, screenW, screenH)
+        CASE 12: ' [12] Dotted Wormhole
+            DrawDottedWormholeDirect(pPixelBuffer, screenW, screenH)
+        CASE 13: ' [13] 3D Undulating Mesh Grid
+            Draw3DGridMeshDirect(pPixelBuffer, screenW, screenH, 0x0000FFFF)
+        CASE 14: ' [14] 3D HyperStars Tunnel
+            DrawHyperStarsDirect(pPixelBuffer, screenW, screenH)
+        CASE 15: ' [15] Infernal Wireframe
+            DrawFireEffectDirect(pPixelBuffer, screenW, screenH)
+            FLOAT beatScale = 1.0 + (g_beatPulse * 0.25)
+            DrawSpinningCubeDirect(pPixelBuffer, screenW, screenH, dynamicColor)            
+            DrawCubeEffectDirectTransparent4X(pPixelBuffer, screenW, screenH)
+        CASE 16: ' [16] Metaball Moiré Interference
+            DrawMetaballsEffectDirect(pPixelBuffer, screenW, screenH)
+            DrawMoireInterferenceDirect(pPixelBuffer, screenW, screenH, dynamicColor)
+        CASE 17: ' [17] Lissajous Bob Snake
+            DrawBobGridComposite(pPixelBuffer, screenW, screenH)
+        CASE 18: ' [18] Markov Haiku
+				DrawIsometricFlyoverDirect(pPixelBuffer, screenW, screenH, phase)
+				' Render 5-7-5 Strict Demoscene Haiku Overlay
+				RenderHaikuOverlayDirect(pPixelBuffer, screenW, screenH, phase)
+        CASE 19: ' [19] Fly-In Outro
+            UpdateAndDrawFlyInOutroDirect(pPixelBuffer, screenW, screenH)
+        CASE 20: ' [20] TV Static Noise
+            DrawTVStaticDirect(pPixelBuffer, screenW, screenH)
+    ENDSELECT
+
+	 ' --- COMPOSITING & OVERLAYS ---
+    AdditiveBlendASM(pPixelBuffer, pCopperBuffer, screenW * screenH)
+    UpdateAndDrawStarfieldDirect(pPixelBuffer, screenW, screenH)
+    SW_RenderBorders(phase * 15.0, pPixelBuffer, screenW, screenH)
+    DrawAnimatedTitleDirect(pPixelBuffer, screenW, screenH, effectTechSpecs[current_overlay], 80)
+    DrawBouncingOverlayNameDirect(pPixelBuffer, screenW, screenH)
+    Render3DVectorScroller(pPixelBuffer, screenW, screenH, 0x00FFDD)
+
+    ' --- FAST CAROUSEL CROSS-FADE PASS ---
+    IF g_isTransitioning = 1 THEN
+        g_transitionFrame = g_transitionFrame + 1
+        
+        ' Fast integer-based alpha attenuation (0 to 255)
+        INT fadeAlpha
+        fadeAlpha = 255 - ((g_transitionFrame * 255) / TRANSITION_DURATION)
+
+        IF fadeAlpha > 0 THEN
+            INT vpOffset = 151 * screenW * 4
+            INT vpPixels = screenW * (screenH - 150 - 151)
+            AlphaBlendBuffersASM(pPixelBuffer + vpOffset, pTransitionBuffer + vpOffset, vpPixels, fadeAlpha)
+        ELSE
+            g_isTransitioning = 0
+        ENDIF
+    ENDIF
+	' --- FINAL SCREEN FLIP ---
+   POINTER pShow
+   INT hShowDC
+   pShow = pPixelBuffer
+   hShowDC = hMemDC
+   IF g_postFX = 1 AND pPostBuffer <> NULL THEN
+       ApplyPostFX(pPixelBuffer, pPostBuffer, screenW, screenH)
+       pShow = pPostBuffer
+       hShowDC = hPostDC
+   ENDIF
+   IF g_needScale = 0 THEN
+       SetDIBitsToDevice(hWindowDC, 0, 0, screenW, screenH, 0, 0, 0, screenH, pShow, &bmpInfo, 0)
+   ELSE
+       StretchBlt(hWindowDC, g_dstX, g_dstY, g_dstW, g_dstH, hShowDC, 0, 0, screenW, screenH, 0x00CC0020)
+   ENDIF
+ENDSUB
+
+SUB SetStroke(charIdx:INT, strokeIdx:INT, x1:INT, y1:INT, x2:INT, y2:INT)
+    INT base = strokeIdx * 4
+    fontData[charIdx, base]     = x1
+    fontData[charIdx, base + 1] = y1
+    fontData[charIdx, base + 2] = x2
+    fontData[charIdx, base + 3] = y2
+ENDSUB
+
+SUB EndGlyph(charIdx:INT, strokeIdx:INT)
+    INT base = strokeIdx * 4
+    fontData[charIdx, base]     = -1
+    fontData[charIdx, base + 1] = -1
+    fontData[charIdx, base + 2] = -1
+    fontData[charIdx, base + 3] = -1
+ENDSUB
+
+SUB InitVectorFontTable()
+    SetStroke(0, 0, 0, 16, 8, 0): SetStroke(0, 1, 8, 0, 16, 16): SetStroke(0, 2, 4, 9, 12, 9): EndGlyph(0, 3)
+    SetStroke(1, 0, 0, 0, 0, 16): SetStroke(1, 1, 0, 0, 10, 0): SetStroke(1, 2, 10, 0, 12, 4)
+    SetStroke(1, 3, 12, 4, 10, 8): SetStroke(1, 4, 10, 8, 0, 8): SetStroke(1, 5, 10, 8, 12, 12)
+    SetStroke(1, 6, 12, 12, 10, 16): SetStroke(1, 7, 10, 16, 0, 16): EndGlyph(1, 8)
+    SetStroke(2, 0, 14, 3, 4, 0): SetStroke(2, 1, 4, 0, 0, 4): SetStroke(2, 2, 0, 4, 0, 12)
+    SetStroke(2, 3, 0, 12, 4, 16): SetStroke(2, 4, 4, 16, 14, 13): EndGlyph(2, 5)
+    SetStroke(3, 0, 0, 0, 0, 16): SetStroke(3, 1, 0, 0, 10, 0): SetStroke(3, 2, 10, 0, 16, 6)
+    SetStroke(3, 3, 16, 6, 16, 10): SetStroke(3, 4, 16, 10, 10, 16): SetStroke(3, 5, 10, 16, 0, 16): EndGlyph(3, 6)
+    SetStroke(4, 0, 0, 0, 0, 16): SetStroke(4, 1, 0, 0, 12, 0): SetStroke(4, 2, 0, 8, 9, 8)
+    SetStroke(4, 3, 0, 16, 12, 16): EndGlyph(4, 4)
+    SetStroke(5, 0, 0, 0, 0, 16): SetStroke(5, 1, 0, 0, 12, 0): SetStroke(5, 2, 0, 8, 9, 8): EndGlyph(5, 3)
+    SetStroke(6, 0, 14, 3, 4, 0): SetStroke(6, 1, 4, 0, 0, 4): SetStroke(6, 2, 0, 4, 0, 12)
+    SetStroke(6, 3, 0, 12, 4, 16): SetStroke(6, 4, 4, 16, 12, 16): SetStroke(6, 5, 12, 16, 12, 9)
+    SetStroke(6, 6, 12, 9, 7, 9): EndGlyph(6, 7)
+    SetStroke(7, 0, 0, 0, 0, 16): SetStroke(7, 1, 12, 0, 12, 16): SetStroke(7, 2, 0, 8, 12, 8): EndGlyph(7, 3)
+    SetStroke(8, 0, 2, 0, 10, 0): SetStroke(8, 1, 6, 0, 6, 16): SetStroke(8, 2, 2, 16, 10, 16): EndGlyph(8, 3)
+    SetStroke(9, 0, 4, 0, 14, 0): SetStroke(9, 1, 9, 0, 9, 12): SetStroke(9, 2, 9, 12, 5, 16)
+    SetStroke(9, 3, 5, 16, 0, 12): EndGlyph(9, 4)
+    SetStroke(10, 0, 0, 0, 0, 16): SetStroke(10, 1, 12, 0, 0, 8): SetStroke(10, 2, 0, 8, 12, 16): EndGlyph(10, 3)
+    SetStroke(11, 0, 0, 0, 0, 16): SetStroke(11, 1, 0, 16, 12, 16): EndGlyph(11, 2)
+    SetStroke(12, 0, 0, 16, 0, 0): SetStroke(12, 1, 0, 0, 8, 10): SetStroke(12, 2, 8, 10, 16, 0)
+    SetStroke(12, 3, 16, 0, 16, 16): EndGlyph(12, 4)
+    SetStroke(13, 0, 0, 16, 0, 0): SetStroke(13, 1, 0, 0, 14, 16): SetStroke(13, 2, 14, 16, 14, 0): EndGlyph(13, 3)
+    SetStroke(14, 0, 4, 0, 12, 0): SetStroke(14, 1, 12, 0, 16, 4): SetStroke(14, 2, 16, 4, 16, 12)
+    SetStroke(14, 3, 16, 12, 12, 16): SetStroke(14, 4, 12, 16, 4, 16): SetStroke(14, 5, 4, 16, 0, 12)
+    SetStroke(14, 6, 0, 12, 0, 4): SetStroke(14, 7, 0, 4, 4, 0): EndGlyph(14, 8)
+    SetStroke(15, 0, 0, 16, 0, 0): SetStroke(15, 1, 0, 0, 10, 0): SetStroke(15, 2, 10, 0, 14, 4)
+    SetStroke(15, 3, 14, 4, 10, 8): SetStroke(15, 4, 10, 8, 0, 8): EndGlyph(15, 5)
+    SetStroke(16, 0, 4, 0, 12, 0): SetStroke(16, 1, 12, 0, 16, 4): SetStroke(16, 2, 16, 4, 16, 12)
+    SetStroke(16, 3, 16, 12, 12, 16): SetStroke(16, 4, 12, 16, 4, 16): SetStroke(16, 5, 4, 16, 0, 12)
+    SetStroke(16, 6, 0, 12, 0, 4): SetStroke(16, 7, 0, 4, 4, 0): SetStroke(16, 8, 9, 9, 16, 16): EndGlyph(16, 9)
+    SetStroke(17, 0, 0, 16, 0, 0): SetStroke(17, 1, 0, 0, 10, 0): SetStroke(17, 2, 10, 0, 14, 4)
+    SetStroke(17, 3, 14, 4, 10, 8): SetStroke(17, 4, 10, 8, 0, 8): SetStroke(17, 5, 6, 8, 14, 16): EndGlyph(17, 6)
+    SetStroke(18, 0, 14, 3, 4, 0): SetStroke(18, 1, 4, 0, 0, 4): SetStroke(18, 2, 0, 4, 4, 8)
+    SetStroke(18, 3, 4, 8, 10, 8): SetStroke(18, 4, 10, 8, 14, 12): SetStroke(18, 5, 14, 12, 10, 16)
+    SetStroke(18, 6, 10, 16, 0, 13): EndGlyph(18, 7)
+    SetStroke(19, 0, 0, 0, 14, 0): SetStroke(19, 1, 7, 0, 7, 16): EndGlyph(19, 2)
+    SetStroke(20, 0, 0, 0, 0, 12): SetStroke(20, 1, 0, 12, 4, 16): SetStroke(20, 2, 4, 16, 8, 16)
+    SetStroke(20, 3, 8, 16, 12, 12): SetStroke(20, 4, 12, 12, 12, 0): EndGlyph(20, 5)
+    SetStroke(21, 0, 0, 0, 6, 16): SetStroke(21, 1, 6, 16, 12, 0): EndGlyph(21, 2)
+    SetStroke(22, 0, 0, 0, 3, 16): SetStroke(22, 1, 3, 16, 8, 6): SetStroke(22, 2, 8, 6, 13, 16)
+    SetStroke(22, 3, 13, 16, 16, 0): EndGlyph(22, 4)
+    SetStroke(23, 0, 0, 0, 14, 16): SetStroke(23, 1, 14, 0, 0, 16): EndGlyph(23, 2)
+    SetStroke(24, 0, 0, 0, 7, 8): SetStroke(24, 1, 14, 0, 7, 8): SetStroke(24, 2, 7, 8, 7, 16): EndGlyph(24, 3)
+    SetStroke(25, 0, 0, 0, 14, 0): SetStroke(25, 1, 14, 0, 0, 16): SetStroke(25, 2, 0, 16, 14, 16): EndGlyph(25, 3)
+
+    SetStroke(26, 0, 4, 0, 12, 0): SetStroke(26, 1, 12, 0, 16, 4): SetStroke(26, 2, 16, 4, 16, 12)
+    SetStroke(26, 3, 16, 12, 12, 16): SetStroke(26, 4, 12, 16, 4, 16): SetStroke(26, 5, 4, 16, 0, 12)
+    SetStroke(26, 6, 0, 12, 0, 4): SetStroke(26, 7, 0, 4, 4, 0): SetStroke(26, 8, 12, 4, 4, 12): EndGlyph(26, 9)
+    SetStroke(27, 0, 2, 4, 8, 0): SetStroke(27, 1, 8, 0, 8, 16): SetStroke(27, 2, 2, 16, 14, 16): EndGlyph(27, 3)
+    SetStroke(28, 0, 0, 4, 4, 0): SetStroke(28, 1, 4, 0, 12, 0): SetStroke(28, 2, 12, 0, 16, 4)
+    SetStroke(28, 3, 16, 4, 0, 16): SetStroke(28, 4, 0, 16, 16, 16): EndGlyph(28, 5)
+    SetStroke(29, 0, 0, 0, 16, 0): SetStroke(29, 1, 16, 0, 6, 8): SetStroke(29, 2, 6, 8, 12, 8)
+    SetStroke(29, 3, 12, 8, 16, 12): SetStroke(29, 4, 16, 12, 12, 16): SetStroke(29, 5, 12, 16, 0, 16): EndGlyph(29, 6)
+    SetStroke(30, 0, 12, 0, 0, 10): SetStroke(30, 1, 0, 10, 16, 10): SetStroke(30, 2, 12, 0, 12, 16): EndGlyph(30, 3)
+    SetStroke(31, 0, 16, 0, 0, 0): SetStroke(31, 1, 0, 0, 0, 7): SetStroke(31, 2, 0, 7, 12, 7)
+    SetStroke(31, 3, 12, 7, 16, 10): SetStroke(31, 4, 16, 10, 16, 13): SetStroke(31, 5, 16, 13, 12, 16)
+    SetStroke(31, 6, 12, 16, 0, 16): EndGlyph(31, 7)
+    SetStroke(32, 0, 12, 0, 4, 0): SetStroke(32, 1, 4, 0, 0, 4): SetStroke(32, 2, 0, 4, 0, 12)
+    SetStroke(32, 3, 0, 12, 4, 16): SetStroke(32, 4, 4, 16, 12, 16): SetStroke(32, 5, 12, 16, 16, 12)
+    SetStroke(32, 6, 16, 12, 16, 8): SetStroke(32, 7, 16, 8, 12, 8): SetStroke(32, 8, 12, 8, 0, 8): EndGlyph(32, 9)
+    SetStroke(33, 0, 0, 0, 16, 0): SetStroke(33, 1, 16, 0, 4, 16): SetStroke(33, 2, 6, 8, 14, 8): EndGlyph(33, 3)
+    SetStroke(34, 0, 4, 0, 12, 0): SetStroke(34, 1, 12, 0, 16, 4): SetStroke(34, 2, 16, 4, 0, 12)
+    SetStroke(34, 3, 0, 12, 4, 16): SetStroke(34, 4, 4, 16, 12, 16): SetStroke(34, 5, 12, 16, 16, 12)
+    SetStroke(34, 6, 16, 12, 0, 4): SetStroke(34, 7, 0, 4, 4, 0): EndGlyph(34, 8)
+    SetStroke(35, 0, 16, 8, 4, 8): SetStroke(35, 1, 4, 8, 0, 4): SetStroke(35, 2, 0, 4, 4, 0)
+    SetStroke(35, 3, 4, 0, 12, 0): SetStroke(35, 4, 12, 0, 16, 4): SetStroke(35, 5, 16, 4, 16, 12)
+    SetStroke(35, 6, 16, 12, 12, 16): SetStroke(35, 7, 12, 16, 4, 16): EndGlyph(35, 8)
+
+    SetStroke(36, 0, 0, 8, 10, 8): SetStroke(36, 1, 10, 8, 10, 16): SetStroke(36, 2, 10, 16, 0, 16)
+    SetStroke(36, 3, 0, 16, 0, 12): SetStroke(36, 4, 0, 12, 10, 12): EndGlyph(36, 5)
+    SetStroke(37, 0, 0, 0, 0, 16): SetStroke(37, 1, 0, 8, 10, 8): SetStroke(37, 2, 10, 8, 10, 16)
+    SetStroke(37, 3, 10, 16, 0, 16): EndGlyph(37, 4)
+    SetStroke(38, 0, 10, 8, 0, 8): SetStroke(38, 1, 0, 8, 0, 16): SetStroke(38, 2, 0, 16, 10, 16): EndGlyph(38, 3)
+    SetStroke(39, 0, 10, 0, 10, 16): SetStroke(39, 1, 10, 8, 0, 8): SetStroke(39, 2, 0, 8, 0, 16)
+    SetStroke(39, 3, 0, 16, 10, 16): EndGlyph(39, 4)
+    SetStroke(40, 0, 0, 12, 10, 12): SetStroke(40, 1, 10, 12, 10, 8): SetStroke(40, 2, 10, 8, 0, 8)
+    SetStroke(40, 3, 0, 8, 0, 16): SetStroke(40, 4, 0, 16, 10, 16): EndGlyph(40, 5)
+    SetStroke(41, 0, 8, 0, 2, 0): SetStroke(41, 1, 2, 0, 2, 16): SetStroke(41, 2, 0, 6, 8, 6): EndGlyph(41, 3)
+    SetStroke(42, 0, 10, 8, 0, 8): SetStroke(42, 1, 0, 8, 0, 14): SetStroke(42, 2, 0, 14, 10, 14)
+    SetStroke(42, 3, 10, 8, 10, 20): SetStroke(42, 4, 10, 20, 0, 20): EndGlyph(42, 5)
+    SetStroke(43, 0, 0, 0, 0, 16): SetStroke(43, 1, 0, 8, 10, 8): SetStroke(43, 2, 10, 8, 10, 16): EndGlyph(43, 3)
+    SetStroke(44, 0, 4, 4, 4, 5): SetStroke(44, 1, 4, 8, 4, 16): EndGlyph(44, 2)
+    SetStroke(45, 0, 6, 4, 6, 5): SetStroke(45, 1, 6, 8, 6, 20): SetStroke(45, 2, 6, 20, 0, 20): EndGlyph(45, 3)
+    SetStroke(46, 0, 0, 0, 0, 16): SetStroke(46, 1, 8, 8, 0, 12): SetStroke(46, 2, 0, 12, 8, 16): EndGlyph(46, 3)
+    SetStroke(47, 0, 4, 0, 4, 16): EndGlyph(47, 1)
+    SetStroke(48, 0, 0, 8, 0, 16): SetStroke(48, 1, 0, 8, 5, 8): SetStroke(48, 2, 5, 8, 5, 16)
+    SetStroke(48, 3, 5, 8, 10, 8): SetStroke(48, 4, 10, 8, 10, 16): EndGlyph(48, 5)
+    SetStroke(49, 0, 0, 8, 0, 16): SetStroke(49, 1, 0, 8, 10, 8): SetStroke(49, 2, 10, 8, 10, 16): EndGlyph(49, 3)
+    SetStroke(50, 0, 0, 8, 10, 8): SetStroke(50, 1, 10, 8, 10, 16): SetStroke(50, 2, 10, 16, 0, 16)
+    SetStroke(50, 3, 0, 16, 0, 8): EndGlyph(50, 4)
+    SetStroke(51, 0, 0, 8, 0, 20): SetStroke(51, 1, 0, 8, 10, 8): SetStroke(51, 2, 10, 8, 10, 14)
+    SetStroke(51, 3, 10, 14, 0, 14): EndGlyph(51, 4)
+    SetStroke(52, 0, 10, 8, 10, 20): SetStroke(52, 1, 10, 8, 0, 8): SetStroke(52, 2, 0, 8, 0, 14)
+    SetStroke(52, 3, 0, 14, 10, 14): EndGlyph(52, 4)
+    SetStroke(53, 0, 0, 8, 0, 16): SetStroke(53, 1, 0, 10, 8, 8): EndGlyph(53, 2)
+    SetStroke(54, 0, 10, 8, 0, 8): SetStroke(54, 1, 0, 8, 10, 12): SetStroke(54, 2, 10, 12, 0, 16): EndGlyph(54, 3)
+    SetStroke(55, 0, 4, 2, 4, 16): SetStroke(55, 1, 0, 6, 8, 6): EndGlyph(55, 2)
+    SetStroke(56, 0, 0, 8, 0, 16): SetStroke(56, 1, 0, 16, 10, 16): SetStroke(56, 2, 10, 16, 10, 8): EndGlyph(56, 3)
+    SetStroke(57, 0, 0, 8, 5, 16): SetStroke(57, 1, 5, 16, 10, 8): EndGlyph(57, 2)
+    SetStroke(58, 0, 0, 8, 2, 16): SetStroke(58, 1, 2, 16, 5, 11): SetStroke(58, 2, 5, 11, 8, 16)
+    SetStroke(58, 3, 8, 16, 10, 8): EndGlyph(58, 4): SetStroke(62, 0, 2, 8, 14, 8): EndGlyph(62, 1)
+    SetStroke(59, 0, 0, 8, 10, 16): SetStroke(59, 1, 10, 8, 0, 16): EndGlyph(59, 2)
+    SetStroke(60, 0, 0, 8, 5, 14): SetStroke(60, 1, 10, 8, 0, 20): EndGlyph(60, 2)
+    SetStroke(61, 0, 0, 8, 10, 8): SetStroke(61, 1, 10, 8, 0, 16): SetStroke(61, 2, 0, 16, 10, 16): EndGlyph(61, 3)
+ENDSUB
+
+SUB DrawLineDirect(pBuffer:POINTER, screenW:INT, screenH:INT, x1:INT, y1:INT, x2:INT, y2:INT, penColor:INT)
+    IF pBuffer = NULL THEN RETURN
+
+    g_lineDx = ABS(x2 - x1)
+    g_lineDy = ABS(y2 - y1)
+
+    IF x1 < x2 THEN g_lineSx = 1 ELSE g_lineSx = -1
+    IF y1 < y2 THEN g_lineSy = 1 ELSE g_lineSy = -1
+
+    g_lineErr = g_lineDx - g_lineDy
+    g_lineNegDy = -g_lineDy
+
+    g_lineX1 = x1
+    g_lineY1 = y1
+    g_lineX2 = x2
+    g_lineY2 = y2
+
+    g_pAsmPixel = pBuffer
+    g_asmPixelColor = penColor
+    g_asmCount = screenW
+    g_asmNumBytes = screenH
+
+    _asm
+        push edi
+        push esi
+        push ebx
+
+        mov eax, [g_lineX1]
+        mov ebx, [g_lineY1]
+        mov ecx, [g_lineErr]
+
+    line_loop:
+        test eax, eax
+        js skip_pixel
+        cmp eax, [g_asmCount]
+        jge skip_pixel
+
+        test ebx, ebx
+        js skip_pixel
+        cmp ebx, [g_asmNumBytes]
+        jge skip_pixel
+
+        mov edi, ebx
+        imul edi, [g_asmCount]
+        add edi, eax
+        shl edi, 2
+        add edi, [g_pAsmPixel]
+
+        push eax
+        mov eax, [g_asmPixelColor]
+        mov [edi], eax
+        pop eax
+
+    skip_pixel:
+        cmp eax, [g_lineX2]
+        jne continue_line
+        cmp ebx, [g_lineY2]
+        je line_exit
+
+    continue_line:
+        mov edx, ecx
+        shl edx, 1
+
+        cmp edx, [g_lineNegDy]
+        jle check_dy
+
+        sub ecx, [g_lineDy]
+        add eax, [g_lineSx]
+
+    check_dy:
+        cmp edx, [g_lineDx]
+        jge line_loop
+
+        add ecx, [g_lineDx]
+        add ebx, [g_lineSy]
+        jmp line_loop
+
+    line_exit:
+        pop ebx
+        pop esi
+        pop edi
+    _endasm
+ENDSUB
+
+' Same Bresenham as DrawLineDirect, but the pixel write is  dst = saturate(dst + colour).
+' dotted = 1 draws 2 pixels out of every 4 (replaces the 2x2 dots, which would be 4x brighter when added).
+SUB DrawLineAdd(pBuffer:POINTER, screenW:INT, screenH:INT, x1:INT, y1:INT, x2:INT, y2:INT, penColor:INT, dotted:INT)
+    IF pBuffer = NULL THEN RETURN
+
+    g_lineDx = ABS(x2 - x1)
+    g_lineDy = ABS(y2 - y1)
+
+    IF x1 < x2 THEN g_lineSx = 1 ELSE g_lineSx = -1
+    IF y1 < y2 THEN g_lineSy = 1 ELSE g_lineSy = -1
+
+    g_lineErr = g_lineDx - g_lineDy
+    g_lineNegDy = -g_lineDy
+
+    g_lineX1 = x1
+    g_lineY1 = y1
+    g_lineX2 = x2
+    g_lineY2 = y2
+
+    g_pAsmPixel = pBuffer
+    g_asmPixelColor = penColor
+    g_asmCount = screenW
+    g_asmNumBytes = screenH
+    g_gwDot = dotted
+
+    _asm
+        push edi
+        push esi
+        push ebx
+
+        mov eax, [g_lineX1]
+        mov ebx, [g_lineY1]
+        mov ecx, [g_lineErr]
+        xor esi, esi                        ; step counter (for the dotted pattern)
+        movd xmm1, [g_asmPixelColor]        ; line colour, kept for the whole line
+
+    gwa_loop:
+        test eax, eax
+        js gwa_skip
+        cmp eax, [g_asmCount]
+        jge gwa_skip
+
+        test ebx, ebx
+        js gwa_skip
+        cmp ebx, [g_asmNumBytes]
+        jge gwa_skip
+
+        mov edx, [g_gwDot]
+        test edx, edx
+        jz gwa_write
+        mov edx, esi
+        and edx, 3
+        cmp edx, 2
+        jge gwa_skip                        ; dotted: steps 2 and 3 of every 4 stay empty
+
+    gwa_write:
+        mov edi, ebx
+        imul edi, [g_asmCount]
+        add edi, eax
+        shl edi, 2
+        add edi, [g_pAsmPixel]
+
+        movd xmm0, [edi]
+        paddusb xmm0, xmm1                  ; dst = min(255, dst + colour) per channel
+        movd [edi], xmm0
+
+    gwa_skip:
+        inc esi
+        cmp eax, [g_lineX2]
+        jne gwa_cont
+        cmp ebx, [g_lineY2]
+        je gwa_exit
+
+    gwa_cont:
+        mov edx, ecx
+        shl edx, 1
+
+        cmp edx, [g_lineNegDy]
+        jle gwa_dy
+
+        sub ecx, [g_lineDy]
+        add eax, [g_lineSx]
+
+    gwa_dy:
+        cmp edx, [g_lineDx]
+        jge gwa_loop
+
+        add ecx, [g_lineDx]
+        add ebx, [g_lineSy]
+        jmp gwa_loop
+
+    gwa_exit:
+        pop ebx
+        pop esi
+        pop edi
+    _endasm
+ENDSUB
+
+' Bresenham from the TAIL (x1,y1) to the HEAD (x2,y2). The colour is scaled from ~0 at the tail to 100% at the
+' head (16.16 fixed point, no division in the loop), then ADDED to the pixel with saturation.
+' Pixels outside [clipL,clipR) x [clipT,clipB) are skipped. The caller must keep the line reasonably short.
+SUB DrawStreakAdd(pBuffer:POINTER, screenW:INT, x1:INT, y1:INT, x2:INT, y2:INT, penColor:INT, clipL:INT, clipT:INT, clipR:INT, clipB:INT)
+    INT n
+
+    IF pBuffer = NULL THEN RETURN
+
+    g_lineDx = ABS(x2 - x1)
+    g_lineDy = ABS(y2 - y1)
+
+    IF x1 < x2 THEN g_lineSx = 1 ELSE g_lineSx = -1
+    IF y1 < y2 THEN g_lineSy = 1 ELSE g_lineSy = -1
+
+    g_lineErr = g_lineDx - g_lineDy
+    g_lineNegDy = -g_lineDy
+
+    g_lineX1 = x1
+    g_lineY1 = y1
+    g_lineX2 = x2
+    g_lineY2 = y2
+
+    n = g_lineDx
+    IF g_lineDy > n THEN n = g_lineDy
+    n = n + 1
+    g_stInc = 65536 / n                      ' brightness step per pixel (16.16)
+    g_stF = 0
+
+    g_pAsmPixel = pBuffer
+    g_asmPixelColor = penColor
+    g_asmCount = screenW
+    g_stL = clipL
+    g_stT = clipT
+    g_stR = clipR
+    g_stB = clipB
+
+    _asm
+        push edi
+        push esi
+        push ebx
+
+        mov eax, [g_lineX1]
+        mov ebx, [g_lineY1]
+        mov ecx, [g_lineErr]
+        pxor xmm7, xmm7
+        movd xmm1, [g_asmPixelColor]
+        punpcklbw xmm1, xmm7                ; colour as 4 words
+
+    stk_loop:
+        mov edx, [g_stF]                    ; brightness for this pixel
+        add edx, [g_stInc]
+        mov [g_stF], edx
+
+        cmp eax, [g_stL]
+        jl stk_skip
+        cmp eax, [g_stR]
+        jge stk_skip
+        cmp ebx, [g_stT]
+        jl stk_skip
+        cmp ebx, [g_stB]
+        jge stk_skip
+
+        shr edx, 8                          ; 0..256
+        movd xmm2, edx
+        pshuflw xmm2, xmm2, 0
+        movdqa xmm0, xmm1
+        pmullw xmm0, xmm2
+        psrlw xmm0, 8
+        packuswb xmm0, xmm0                 ; scaled colour in the low 4 bytes
+
+        mov edi, ebx
+        imul edi, [g_asmCount]
+        add edi, eax
+        shl edi, 2
+        add edi, [g_pAsmPixel]
+
+        movd xmm3, [edi]
+        paddusb xmm3, xmm0                  ; dst = min(255, dst + colour)
+        movd [edi], xmm3
+
+    stk_skip:
+        cmp eax, [g_lineX2]
+        jne stk_cont
+        cmp ebx, [g_lineY2]
+        je stk_exit
+
+    stk_cont:
+        mov edx, ecx
+        shl edx, 1
+
+        cmp edx, [g_lineNegDy]
+        jle stk_dy
+
+        sub ecx, [g_lineDy]
+        add eax, [g_lineSx]
+
+    stk_dy:
+        cmp edx, [g_lineDx]
+        jge stk_loop
+
+        add ecx, [g_lineDx]
+        add ebx, [g_lineSy]
+        jmp stk_loop
+
+    stk_exit:
+        pop ebx
+        pop esi
+        pop edi
+    _endasm
+ENDSUB
+
+SUB GetCycleColor(colorPhase:INT), INT
+    INT rIdx, gIdx, bIdx
+    INT r, g, b
+    
+    rIdx = colorPhase & 255
+    gIdx = (colorPhase + 85) & 255
+    bIdx = (colorPhase + 170) & 255
+    
+    r = 128 + ((sinTable[rIdx] * 127) >> 16)
+    g = 128 + ((sinTable[gIdx] * 127) >> 16)
+    b = 128 + ((sinTable[bIdx] * 127) >> 16)
+    
+    RETURN 0xFF000000 | (r << 16) | (g << 8) | b
+ENDSUB
+
+SUB DrawLineTranslucent(pBuffer:POINTER, screenW:INT, screenH:INT, x1:INT, y1:INT, x2:INT, y2:INT)
+    INT dx, dy, sx, sy, err, e2
+    INT px, py, bgPixel
+    INT r, g, b, shadowPixel
+    POINTER pPixel
+
+    dx = ABS(x2 - x1)
+    dy = ABS(y2 - y1)
+
+    IF x1 < x2 THEN sx = 1 ELSE sx = -1
+    IF y1 < y2 THEN sy = 1 ELSE sy = -1
+
+    err = dx - dy
+    px = x1: py = y1
+
+    WHILE 1
+        IF px >= 0 AND px < screenW AND py >= 0 AND py < screenH THEN
+            pPixel = pBuffer + ((py * screenW + px) * 4)
+            
+            bgPixel = *<INT>pPixel
+
+            r = ((bgPixel >> 16) & 0xFF) >> 1
+            g = ((bgPixel >> 8) & 0xFF) >> 1
+            b = (bgPixel & 0xFF) >> 1
+
+            shadowPixel = 0xFF000000 | (r << 16) | (g << 8) | b
+            *<INT>pPixel = shadowPixel
+        ENDIF
+
+        IF px = x2 AND py = y2 THEN BREAK
+
+        e2 = err * 2
+        IF e2 > -dy THEN
+            err = err - dy
+            px = px + sx
+        ENDIF
+        IF e2 < dx THEN
+            err = err + dx
+            py = py + sy
+        ENDIF
+    ENDWHILE
+ENDSUB
+
+SUB DrawVectorCharDirect(pBuffer:POINTER, screenW:INT, screenH:INT, charCode:INT, posX:INT, posY:INT, scaleFX:INT, penColor:INT)
+    INT charIdx, strokeIdx, base
+    INT x1, y1, x2, y2
+    INT sx1, sy1, sx2, sy2
+
+    IF charCode >= 65 AND charCode <= 90 THEN
+        charIdx = charCode - 65
+    ELSEIF charCode >= 48 AND charCode <= 57 THEN
+        charIdx = charCode - 48 + 26
+    ELSEIF charCode >= 97 AND charCode <= 122 THEN
+        charIdx = charCode - 97 + 36
+    ELSEIF charCode = 45 THEN
+        charIdx = 62
+    ELSE
+        RETURN
+    ENDIF
+
+    strokeIdx = 0
+    WHILE strokeIdx < 12
+        base = strokeIdx * 4
+        x1 = fontData[charIdx, base]
+        y1 = fontData[charIdx, base + 1]
+        x2 = fontData[charIdx, base + 2]
+        y2 = fontData[charIdx, base + 3]
+
+        IF x1 = -1 THEN BREAK
+
+        sx1 = posX + ((x1 * scaleFX) >> 16)
+        sy1 = posY + ((y1 * scaleFX) >> 16)
+        sx2 = posX + ((x2 * scaleFX) >> 16)
+        sy2 = posY + ((y2 * scaleFX) >> 16)
+
+        DrawLineDirect(pBuffer, screenW, screenH, sx1, sy1, sx2, sy2, penColor)
+        strokeIdx = strokeIdx + 1
+    ENDWHILE
+ENDSUB
+
+SUB DrawVectorCharShadow(pBuffer:POINTER, screenW:INT, screenH:INT, charCode:INT, posX:INT, posY:INT, scaleFX:INT)
+    INT charIdx, strokeIdx, base
+    INT x1, y1, x2, y2
+    INT sx1, sy1, sx2, sy2
+
+    IF charCode >= 65 AND charCode <= 90 THEN
+        charIdx = charCode - 65
+    ELSEIF charCode >= 48 AND charCode <= 57 THEN
+        charIdx = charCode - 48 + 26
+    ELSEIF charCode >= 97 AND charCode <= 122 THEN
+        charIdx = charCode - 97 + 36
+    ELSEIF charCode = 45 THEN
+        charIdx = 62
+    ELSE
+        RETURN
+    ENDIF
+
+    strokeIdx = 0
+    WHILE strokeIdx < 12
+        base = strokeIdx * 4
+        x1 = fontData[charIdx, base]
+        y1 = fontData[charIdx, base + 1]
+        x2 = fontData[charIdx, base + 2]
+        y2 = fontData[charIdx, base + 3]
+
+        IF x1 = -1 THEN BREAK
+
+        sx1 = posX + ((x1 * scaleFX) >> 16)
+        sy1 = posY + ((y1 * scaleFX) >> 16)
+        sx2 = posX + ((x2 * scaleFX) >> 16)
+        sy2 = posY + ((y2 * scaleFX) >> 16)
+
+        DrawLineTranslucent(pBuffer, screenW, screenH, sx1, sy1, sx2, sy2)
+        strokeIdx = strokeIdx + 1
+    ENDWHILE
+ENDSUB
+
+SUB InitEffectColors()
+    INT i
+    FOR i = 0 TO 11
+        effectColors[i] = RGB(255, 255, 255)
+    NEXT i
+ENDSUB
+
+SUB InitEffectResources()
+    INT i
+    FLOAT angle
+
+    FOR i = 0 TO 255
+        angle = (FLOAT(i) / 256.0) * 6.28318530718
+        sinTable[i] = INT(SIN(angle) * 65536.0)
+        cosTable[i] = INT(COS(angle) * 65536.0)
+    NEXT i
+
+    FOR i = 0 TO 20
+        copperIntensityLUT[i] = INT(SIN((FLOAT(i) / 20.0) * 3.1415926535) * 255.0)
+    NEXT i
+
+    FOR i = 0 TO 149
+        starX[i] = RAND(0, screenW)
+        starY[i] = RAND(1, 140)
+        starDX[i] = FLOAT(RAND(2, 6))
+    NEXT i
+
+    cubeX[0] = -1.0: cubeY[0] = -1.0: cubeZ[0] = -1.0
+    cubeX[1] =  1.0: cubeY[1] = -1.0: cubeZ[1] = -1.0
+    cubeX[2] =  1.0: cubeY[2] =  1.0: cubeZ[2] = -1.0
+    cubeX[3] = -1.0: cubeY[3] =  1.0: cubeZ[3] = -1.0
+    cubeX[4] = -1.0: cubeY[4] = -1.0: cubeZ[4] =  1.0
+    cubeX[5] =  1.0: cubeY[5] = -1.0: cubeZ[5] =  1.0
+    cubeX[6] =  1.0: cubeY[6] =  1.0: cubeZ[6] =  1.0
+    cubeX[7] = -1.0: cubeY[7] =  1.0: cubeZ[7] =  1.0
+ENDSUB
+
+SUB InitEffect(num:INT)
+    current_overlay = num % 19
+    frame_count = 0
+    rotX = 0.0 : rotY = 0.0 : rotZ = 0.0
+    rot = 0.0
+    bannerDropTimer = 0.0
+    g_waveTransformTimer = 0.0
+    
+    'IF current_overlay = 11 THEN PickRandomHaiku()
+    IF current_overlay = 15 THEN InitOutroPages()
+ENDSUB
+
+SUB DrawGravityWebDirect(pBuffer:POINTER, screenW:INT, screenH:INT, penColor:INT)
+    STATIC INT seenEpoch = -1
+    STATIC INT nodeCount = 16
+    STATIC FLOAT gG
+    STATIC FLOAT gOmega2
+    STATIC FLOAT gEps2
+    STATIC FLOAT gLimX
+    STATIC FLOAT gLimY
+    STATIC FLOAT baseDist
+    STATIC INT kickCool = 0
+    STATIC FLOAT prevBeat = 0.0
+
+    INT i, j, sIdx, x1, y1, x2, y2, h
+    INT bestJ, bestD, skelColor
+    INT nodeX[24], nodeY[24]
+    INT dx, dy, distSq, maxDistSq
+    INT alphaIntensity, lineColor
+    INT r, g, b, baseR, baseG, baseB
+    INT dynamicColor, colorIdx
+    INT cx = screenW / 2
+    INT cy = screenH / 2
+    FLOAT sx = FLOAT(screenW) / 800.0
+    FLOAT sy = FLOAT(screenH) / 600.0
+    FLOAT accX, accY, ddx, ddy, d2, f, gEff
+    FLOAT ang, rr, omega, dirSign, vk, rx, ry
+    FLOAT cenX, cenY, rmsSq, dlen
+    FLOAT omegaI
+
+    ' ---- new system at every pass of the carousel ----
+    IF seenEpoch <> g_overlayEpoch THEN
+        seenEpoch = g_overlayEpoch
+        nodeCount = 12 + INT(RND(13.0))                              ' 12 .. 24
+        omega     = 0.018 + RND(0.012)                               ' well strength: orbit period ~210..350 frames
+        gOmega2   = omega * omega
+        gG        = (30.0 + RND(70.0)) * sx * sx * sx               ' mutual attraction
+        gEps2     = (55.0 * sx) * (55.0 * sx)                        ' softening length squared
+        gLimX     = FLOAT(screenW) * 0.48
+        gLimY     = FLOAT(screenH) * 0.40
+        baseDist  = 30000.0 + RND(30000.0)
+        rx        = (140.0 + RND(180.0)) * sx
+        ry        = (90.0 + RND(140.0)) * sy
+
+        FOR i = 0 TO nodeCount - 1
+            ang = RND(6.2831853)
+            rr  = 0.35 + RND(0.65)
+            gwX[i] = FLOAT(cx) + (COS(ang) * rx * rr)
+            gwY[i] = FLOAT(cy) + (SIN(ang) * ry * rr)
+
+            omegaI   = omega * (0.4 + RND(1.8))                       ' own frequency: 0.4 .. 2.2 x
+            gwW2[i]  = omegaI * omegaI
+            gwAnX[i] = FLOAT(cx) + ((RND(1.0) - 0.5) * rx * 1.6)      ' own anchor point
+            gwAnY[i] = FLOAT(cy) + ((RND(1.0) - 0.5) * ry * 1.6)
+            IF RND(1.0) < 0.5 THEN dirSign = 1.0 ELSE dirSign = -1.0  ' own direction
+            vk = 0.3 + RND(0.9)                                       ' own speed
+
+            gwVX[i] = -dirSign * omegaI * (rx / ry) * (gwY[i] - gwAnY[i]) * vk
+            gwVY[i] =  dirSign * omegaI * (ry / rx) * (gwX[i] - gwAnX[i]) * vk
+            gwM[i] = 0.6 + RND(1.6)
+        NEXT i
+    ENDIF
+
+    ' ---- physics: 2 sub-steps of dt = 0.5 ----
+    gEff = gG * (1.0 + (g_beatPulse * 0.8))
+
+    FOR i = 0 TO nodeCount - 1
+        IF RND(1.0) < 0.011 THEN
+            ang = RND(6.2831853)
+            gwVX[i] = gwVX[i] + (2.5 * sx * COS(ang))
+            gwVY[i] = gwVY[i] + (2.5 * sx * SIN(ang))
+        ENDIF
+    NEXT i
+
+    IF g_beatPulse > 0.85 AND prevBeat <= 0.85 THEN
+        FOR i = 0 TO nodeCount - 1
+            IF RND(1.0) < 0.3 THEN
+                ang = RND(6.2831853)
+                gwVX[i] = gwVX[i] + (2.5 * sx * COS(ang))
+                gwVY[i] = gwVY[i] + (2.5 * sx * SIN(ang))
+            ENDIF
+        NEXT i
+    ENDIF
+    prevBeat = g_beatPulse
+
+    FOR sIdx = 1 TO 2
+        FOR i = 0 TO nodeCount - 1
+            accX = (-gwW2[i] * (gwX[i] - gwAnX[i])) + (RND(0.03) - 0.015)
+            accY = (-gwW2[i] * (gwY[i] - gwAnY[i])) + (RND(0.03) - 0.015)
+            FOR j = 0 TO nodeCount - 1
+                IF j <> i THEN
+                    ddx = gwX[j] - gwX[i]
+                    ddy = gwY[j] - gwY[i]
+                    d2  = (ddx * ddx) + (ddy * ddy) + gEps2
+                    f   = gEff * gwM[j] / (d2 * SQRT(d2))
+                    accX = accX + (f * ddx)
+                    accY = accY + (f * ddy)
+                ENDIF
+            NEXT j
+            gwAX[i] = accX
+            gwAY[i] = accY
+        NEXT i
+
+        FOR i = 0 TO nodeCount - 1
+            gwVX[i] = gwVX[i] + (gwAX[i] * 0.5)
+            gwVY[i] = gwVY[i] + (gwAY[i] * 0.5)
+            IF gwVX[i] > 8.0 THEN gwVX[i] = 8.0
+            IF gwVX[i] < -8.0 THEN gwVX[i] = -8.0
+            IF gwVY[i] > 8.0 THEN gwVY[i] = 8.0
+            IF gwVY[i] < -8.0 THEN gwVY[i] = -8.0
+
+            gwX[i] = gwX[i] + (gwVX[i] * 0.5)
+            gwY[i] = gwY[i] + (gwVY[i] * 0.5)
+
+            IF gwX[i] < FLOAT(cx) - gLimX THEN
+                gwX[i] = FLOAT(cx) - gLimX
+                gwVX[i] = ABS(gwVX[i]) * 0.6
+            ENDIF
+            IF gwX[i] > FLOAT(cx) + gLimX THEN
+                gwX[i] = FLOAT(cx) + gLimX
+                gwVX[i] = -ABS(gwVX[i]) * 0.6
+            ENDIF
+            IF gwY[i] < FLOAT(cy) - gLimY THEN
+                gwY[i] = FLOAT(cy) - gLimY
+                gwVY[i] = ABS(gwVY[i]) * 0.6
+            ENDIF
+            IF gwY[i] > FLOAT(cy) + gLimY THEN
+                gwY[i] = FLOAT(cy) + gLimY
+                gwVY[i] = -ABS(gwVY[i]) * 0.6
+            ENDIF
+        NEXT i
+    NEXT sIdx
+
+    cenX = 0.0
+    cenY = 0.0
+    FOR i = 0 TO nodeCount - 1
+        cenX = cenX + gwX[i]
+        cenY = cenY + gwY[i]
+    NEXT i
+    cenX = cenX / FLOAT(nodeCount)
+    cenY = cenY / FLOAT(nodeCount)
+
+    rmsSq = 0.0
+    FOR i = 0 TO nodeCount - 1
+        ddx = gwX[i] - cenX
+        ddy = gwY[i] - cenY
+        rmsSq = rmsSq + (ddx * ddx) + (ddy * ddy)
+    NEXT i
+    rmsSq = rmsSq / FLOAT(nodeCount)
+
+    IF kickCool > 0 THEN kickCool = kickCool - 1
+
+    ' the whole system is about to become a point: push everything outward once (at most every 90 frames)
+    IF kickCool = 0 AND rmsSq < (45.0 * sx) * (45.0 * sx) THEN
+        kickCool = 90
+        FOR i = 0 TO nodeCount - 1
+            ddx = gwX[i] - cenX
+            ddy = gwY[i] - cenY
+            dlen = SQRT((ddx * ddx) + (ddy * ddy)) + 0.001
+            gwVX[i] = gwVX[i] + (3.5 * ddx / dlen)
+            gwVY[i] = gwVY[i] + (3.5 * ddy / dlen)
+        NEXT i
+    ENDIF
+
+    FOR i = 0 TO nodeCount - 1
+        nodeX[i] = INT(gwX[i])
+        nodeY[i] = INT(gwY[i])
+    NEXT i
+
+    ' ---- drawing (as before) ----
+    maxDistSq = INT((baseDist + (14000.0 * SIN(phase * 0.4)) + (g_beatPulse * 8000.0)) * sx * sy)
+    IF maxDistSq < 1 THEN maxDistSq = 1
+
+    colorIdx = INT(phase * 35.0) & 255
+    dynamicColor = GetCycleColor(colorIdx)
+
+    baseR = (dynamicColor >> 16) & 0xFF
+    baseG = (dynamicColor >> 8) & 0xFF
+    baseB = dynamicColor & 0xFF
+
+    FOR i = 0 TO nodeCount - 1
+        FOR j = i + 1 TO nodeCount - 1
+            x1 = nodeX[i] : y1 = nodeY[i]
+            x2 = nodeX[j] : y2 = nodeY[j]
+
+            dx = x2 - x1
+            dy = y2 - y1
+            distSq = dx * dx + dy * dy
+
+            IF distSq < maxDistSq THEN
+                alphaIntensity = 255 - ((distSq * 170) / maxDistSq)
+
+                r = (baseR * alphaIntensity * 150) >> 16       ' 150 = GAIN (256 = full brightness)
+                g = (baseG * alphaIntensity * 150) >> 16
+                b = (baseB * alphaIntensity * 150) >> 16
+
+                lineColor = 0xFF000000 | (r << 16) | (g << 8) | b
+
+                IF alphaIntensity > 190 THEN
+                    DrawLineAdd(pBuffer, screenW, screenH, x1, y1, x2, y2, lineColor, 1)
+                ELSE
+                    DrawLineAdd(pBuffer, screenW, screenH, x1, y1, x2, y2, lineColor, 0)
+                ENDIF
+            ENDIF
+        NEXT j
+
+        h = 1 + INT((gwM[i] * 0.8) + (g_beatPulse * 1.5))          ' node half-size from mass + beat
+        PlotRectDirect(pBuffer, screenW, screenH, nodeX[i] - h, nodeY[i] - h, (h * 2) + 1, (h * 2) + 1, 0xFFFFFFFF)
+    NEXT i
+    skelColor = 0xFF000000 | (((baseR * 90) >> 8) << 16) | (((baseG * 90) >> 8) << 8) | ((baseB * 90) >> 8)
+
+    FOR i = 0 TO nodeCount - 1
+        bestJ = -1
+        bestD = 2000000000
+        FOR j = 0 TO nodeCount - 1
+            IF j <> i THEN
+                dx = nodeX[j] - nodeX[i]
+                dy = nodeY[j] - nodeY[i]
+                distSq = (dx * dx) + (dy * dy)
+                IF distSq < bestD THEN
+                    bestD = distSq
+                    bestJ = j
+                ENDIF
+            ENDIF
+        NEXT j
+        IF bestJ >= 0 THEN
+            IF bestD >= maxDistSq THEN           ' closer pairs were already drawn by the threshold pass
+                DrawLineAdd(pBuffer, screenW, screenH, nodeX[i], nodeY[i], nodeX[bestJ], nodeY[bestJ], skelColor, 0)
+            ENDIF
+        ENDIF
+    NEXT i
+ENDSUB
+
+SUB DrawCircleDirect(pBuffer:POINTER, screenW:INT, screenH:INT, cxVal:INT, cyVal:INT, radius:INT, penColor:INT)
+    INT x, y, err
+    POINTER pPixel
+
+    IF radius <= 0 THEN RETURN
+
+    x = radius
+    y = 0
+    err = 0
+
+    WHILE x >= y
+        IF (cxVal + x) >= 0 AND (cxVal + x) < screenW AND (cyVal + y) >= 0 AND (cyVal + y) < screenH THEN
+            pPixel = pBuffer + (((cyVal + y) * screenW + (cxVal + x)) * 4): *<INT>pPixel = penColor
+        ENDIF
+        IF (cxVal + y) >= 0 AND (cxVal + y) < screenW AND (cyVal + x) >= 0 AND (cyVal + x) < screenH THEN
+            pPixel = pBuffer + (((cyVal + x) * screenW + (cxVal + y)) * 4): *<INT>pPixel = penColor
+        ENDIF
+        IF (cxVal - y) >= 0 AND (cxVal - y) < screenW AND (cyVal + x) >= 0 AND (cyVal + x) < screenH THEN
+            pPixel = pBuffer + (((cyVal + x) * screenW + (cxVal - y)) * 4): *<INT>pPixel = penColor
+        ENDIF
+        IF (cxVal - x) >= 0 AND (cxVal - x) < screenW AND (cyVal + y) >= 0 AND (cyVal + y) < screenH THEN
+            pPixel = pBuffer + (((cyVal + y) * screenW + (cxVal - x)) * 4): *<INT>pPixel = penColor
+        ENDIF
+        IF (cxVal - x) >= 0 AND (cxVal - x) < screenW AND (cyVal - y) >= 0 AND (cyVal - y) < screenH THEN
+            pPixel = pBuffer + (((cyVal - y) * screenW + (cxVal - x)) * 4): *<INT>pPixel = penColor
+        ENDIF
+        IF (cxVal - y) >= 0 AND (cxVal - y) < screenW AND (cyVal - x) >= 0 AND (cyVal - x) < screenH THEN
+            pPixel = pBuffer + (((cyVal - x) * screenW + (cxVal - y)) * 4): *<INT>pPixel = penColor
+        ENDIF
+        IF (cxVal + y) >= 0 AND (cxVal + y) < screenW AND (cyVal - x) >= 0 AND (cyVal - x) < screenH THEN
+            pPixel = pBuffer + (((cyVal - x) * screenW + (cxVal + y)) * 4): *<INT>pPixel = penColor
+        ENDIF
+        IF (cxVal + x) >= 0 AND (cxVal + x) < screenW AND (cyVal - y) >= 0 AND (cyVal - y) < screenH THEN
+            pPixel = pBuffer + (((cyVal - y) * screenW + (cxVal + x)) * 4): *<INT>pPixel = penColor
+        ENDIF
+
+        IF err <= 0 THEN
+            y = y + 1
+            err = err + 2 * y + 1
+        ENDIF
+        IF err > 0 THEN
+            x = x - 1
+            err = err - 2 * x + 1
+        ENDIF
+    ENDWHILE
+ENDSUB
+
+SUB DrawMoireInterferenceDirect(pBuffer:POINTER, screenW:INT, screenH:INT, penColor:INT)
+    DEF i, r1:INT
+    INT center1X, center1Y, center2X, center2Y
+    FLOAT orbitRadius, zoomFactor
+
+    rot = rot + 0.025
+    orbitRadius = 110.0
+    zoomFactor = 0.7 + ABS(SIN(rot * 1.5)) * 1.5
+
+    center1X = cx + INT(COS(rot) * orbitRadius * zoomFactor)
+    center1Y = cy + INT(SIN(rot) * orbitRadius * zoomFactor)
+    center2X = cx - INT(COS(rot) * orbitRadius * zoomFactor)
+    center2Y = cy - INT(SIN(rot) * orbitRadius * zoomFactor)
+
+    FOR i = 0 TO 19
+        r1 = INT((FLOAT(i * 18) + SIN(rot * 2.0) * 12.0) * zoomFactor)
+        
+        IF r1 > 0 THEN
+            DrawCircleDirect(pBuffer, screenW, screenH, center1X, center1Y, r1, penColor)
+            DrawCircleDirect(pBuffer, screenW, screenH, center2X, center2Y, r1, penColor)
+        ENDIF
+    NEXT i
+ENDSUB
+
+SUB DrawRotozoomDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+    DEF i, j, px, py:INT
+    FLOAT angle, zoom, s, c
+    INT activeColor, colorOffset
+
+    rot = rot + 0.04
+    zoom = 0.5 + ABS(SIN(rot * 0.5)) * 3.0
+    angle = rot
+    s = SIN(angle)
+    c = COS(angle)
+
+    FOR i = -12 TO 12 STEP 2
+        FOR j = -12 TO 12 STEP 2
+            colorOffset = INT(phase * 40.0 + (i * 5) + (j * 5)) & 255
+            activeColor = GetCycleColor(colorOffset)
+
+            px = cx + INT((FLOAT(i * 20) * c - FLOAT(j * 20) * s) * zoom)
+            py = cy + INT((FLOAT(i * 20) * s + FLOAT(j * 20) * c) * zoom)
+
+            PlotRectDirect(pBuffer, screenW, screenH, px, py, 4, 4, activeColor)
+        NEXT j
+    NEXT i
+ENDSUB
+
+SUB DrawSuperRoseCurveDirect(pBuffer:POINTER, screenW:INT, screenH:INT, penColor:INT)
+    DEF i, x, y, px, py:INT
+    FLOAT t, k, r
+
+    k = 4.0 + SIN(rot * 0.5) * 3.0
+    rot = rot + 0.03
+
+    px = cx + INT(COS(0.0) * 200.0)
+    py = cy
+
+    FOR i = 0 TO 720 STEP 5
+        t = FLOAT(i) * 0.0174532925
+        r = COS(k * t) * 200.0
+
+        x = cx + INT(r * COS(t))
+        y = cy + INT(r * SIN(t))
+
+        DrawLineDirect(pBuffer, screenW, screenH, px, py, x, y, penColor)
+
+        px = x
+        py = y
+    NEXT i
+ENDSUB
+
+SUB DrawWaveRipplesDirect(pBuffer:POINTER, screenW:INT, screenH:INT, penColor:INT)
+    ' Safety guard - ensure heightmap buffers exist before rendering
+    IF g_pWaveBuffer1 = NULL OR g_pWaveBuffer2 = NULL THEN
+        InitWaveBuffers()
+        IF g_pWaveBuffer1 = NULL OR g_pWaveBuffer2 = NULL THEN RETURN
+    ENDIF
+
+    INT i, r, rx, ry
+    POINTER pSrcBuf, pDstBuf
+
+    g_waveTransformTimer = g_waveTransformTimer + 0.05
+
+    ' PHASE 1: Initial expanding concentric rings transition
+    IF g_waveTransformTimer < 3.5 THEN
+        rot = rot + 0.1
+        INT rotOffset
+        rotOffset = INT(rot * 10.0)
+
+        FOR i = 1 TO 10
+            r = (i * 30 + rotOffset) % 400
+            DrawCircleDirect(pBuffer, screenW, screenH, cx, cy, r, penColor)
+        NEXT i
+        RETURN
+    ENDIF
+
+    ' PHASE 2: Safe Pointer Assignment (Prevents underflow crashes)
+    IF g_activeWaveBuf = 0 THEN
+        pSrcBuf = g_pWaveBuffer1
+        pDstBuf = g_pWaveBuffer2
+    ELSE
+        pSrcBuf = g_pWaveBuffer2
+        pDstBuf = g_pWaveBuffer1
+    ENDIF
+
+    ' Random drop injection (~25% chance per frame)
+    IF RAND(0, 100) < 25 THEN
+        rx = RAND(100, screenW - 100)
+        ry = RAND(180, screenH - 180)
+        InjectWaveDrop(pSrcBuf, screenW, screenH, rx, ry, 4, 1024)
+    ENDIF
+
+    ' Execute wave heightmap propagation and color mapping
+    ProcessWaveSimulation(pSrcBuf, pDstBuf, screenW, screenH)
+    RenderWaveHeightMap(pDstBuf, pBuffer, screenW, screenH, penColor)
+
+    ' Safe integer buffer flip
+    IF g_activeWaveBuf = 0 THEN
+        g_activeWaveBuf = 1
+    ELSE
+        g_activeWaveBuf = 0
+    ENDIF
+ENDSUB
+
+SUB PlotRectDirect(pBuffer:POINTER, screenW:INT, screenH:INT, x:INT, y:INT, w:INT, h:INT, penColor:INT)
+    INT rx, ry, px, py
+    POINTER pPixel
+
+    FOR ry = 0 TO h - 1
+        py = y + ry
+        IF py >= 0 AND py < screenH THEN
+            FOR rx = 0 TO w - 1
+                px = x + rx
+                IF px >= 0 AND px < screenW THEN
+                    pPixel = pBuffer + ((py * screenW + px) * 4)
+                    *<INT>pPixel = penColor
+                ENDIF
+            NEXT rx
+        ENDIF
+    NEXT ry
+ENDSUB
+
+SUB DrawFireworksDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+    DEF f, p:INT
+    FLOAT angle, speed
+    INT calcX, calcY
+
+    FOR f = 0 TO 2
+        IF fireworkState[f] = 0 THEN
+            fireworkY[f] = fireworkY[f] - 12
+            PlotRectDirect(pBuffer, screenW, screenH, fireworkX[f] - 1, fireworkY[f] - 4, 3, 8, 0xFFFFFFFF)
+            
+            IF fireworkY[f] <= RAND(100, cy + 50) THEN
+                fireworkState[f] = 1
+                partLife[f] = 50
+                
+                FOR p = 0 TO 29
+                    angle = FLOAT(RAND(0, 628)) / 100.0
+                    speed = FLOAT(RAND(2, 10)) * (1.0 + (g_beatPulse * 0.50))
+                    
+                    partX[f, p] = FLOAT(fireworkX[f])
+                    partY[f, p] = FLOAT(fireworkY[f])
+                    partVX[f, p] = COS(angle) * speed
+                    partVY[f, p] = SIN(angle) * speed
+                NEXT p
+            ENDIF
+        ELSE
+            partLife[f] = partLife[f] - 1
+            
+            FOR p = 0 TO 29
+                partX[f, p] = partX[f, p] + partVX[f, p]
+                partY[f, p] = partY[f, p] + partVY[f, p]
+                partVY[f, p] = partVY[f, p] + 0.2
+                
+                calcX = INT(partX[f, p])
+                calcY = INT(partY[f, p])
+                
+                PlotRectDirect(pBuffer, screenW, screenH, calcX, calcY, 3, 3, GetCycleColor((partLife[f] * 5 + p * 8) & 255))
+            NEXT p
+            
+            IF partLife[f] <= 0 THEN
+                fireworkState[f] = 0
+                fireworkX[f] = RAND(200, screenW - 200)
+                fireworkY[f] = screenH + 20
+            ENDIF
+        ENDIF
+    NEXT f
+ENDSUB
+
+' ---------------------------------------------------------------------
+' Initialize Demoscene & Tech Vocabulary
+' ---------------------------------------------------------------------
+SUB InitTechDictionary()
+    numTechAd = 35
+    techAd[1]  = "silent":    techAd[2]  = "broken":    techAd[3]  = "looping":   techAd[4]  = "arcane"
+    techAd[5]  = "bitter":    techAd[6]  = "hidden":    techAd[7]  = "wintry":    techAd[8]  = "tricky"
+    techAd[9]  = "opaque":    techAd[10] = "rapid":     techAd[11] = "golden":    techAd[12] = "amber"
+    techAd[13] = "copper":    techAd[14] = "cached":    techAd[15] = "frozen":    techAd[16] = "queued"
+    techAd[17] = "nested":    techAd[18] = "aligned":   techAd[19] = "paged":     techAd[20] = "mapped"
+    techAd[21] = "shaded":    techAd[22] = "dithered":  techAd[23] = "raster":    techAd[24] = "packed"
+    techAd[25] = "unrolled":  techAd[26] = "linked":    techAd[27] = "static":    techAd[28] = "fluid"
+    techAd[29] = "digital":   techAd[30] = "retro":     techAd[31] = "smooth":    techAd[32] = "boundless"
+    techAd[33] = "cleared":   techAd[34] = "tiled":     techAd[35] = "drifting"
+
+    numTechNouns = 35
+    techNoun[1]  = "byte":      techNoun[2]  = "bit":       techNoun[3]  = "frame":     techNoun[4]  = "slope"
+    techNoun[5]  = "cell":      techNoun[6]  = "hue":       techNoun[7]  = "shade":     techNoun[8]  = "wave"
+    techNoun[9]  = "code":      techNoun[10] = "stack":     techNoun[11] = "heap":      techNoun[12] = "grid"
+    techNoun[13] = "mesh":      techNoun[14] = "peak":      techNoun[15] = "vector":    techNoun[16] = "raster"
+    techNoun[17] = "pixel":     techNoun[18] = "buffer":    techNoun[19] = "cycle":     techNoun[20] = "pointer"
+    techNoun[21] = "lookup":    techNoun[22] = "texture":   techNoun[23] = "matrix":    techNoun[24] = "register"
+    techNoun[25] = "opcode":    techNoun[26] = "assembler": techNoun[27] = "viewport":  techNoun[28] = "scanline"
+    techNoun[29] = "copper":    techNoun[30] = "demogroup": techNoun[31] = "pipeline":  techNoun[32] = "vertex"
+    techNoun[33] = "sinewave":  techNoun[34] = "horizon":   techNoun[35] = "screensaver"
+
+    numTechVerbs = 30
+    techVerb[1]  = "runs":      techVerb[2]  = "fails":     techVerb[3]  = "loops":     techVerb[4]  = "drifts"
+    techVerb[5]  = "halts":     techVerb[6]  = "floats":    techVerb[7]  = "fades":     techVerb[8]  = "falls"
+    techVerb[9]  = "yields":    techVerb[10] = "shifts":    techVerb[11] = "plots":     techVerb[12] = "draws"
+    techVerb[13] = "scans":     techVerb[14] = "fetches":   techVerb[15] = "steps":     techVerb[16] = "rotates"
+    techVerb[17] = "renders":   techVerb[18] = "compiles":  techVerb[19] = "flushes":   techVerb[20] = "clears"
+    techVerb[21] = "streams":   techVerb[22] = "scales":    techVerb[23] = "glides":    techVerb[24] = "sways"
+    techVerb[25] = "blits":     techVerb[26] = "clamps":    techVerb[27] = "threads":   techVerb[28] = "swaps"
+    techVerb[29] = "interpolates": techVerb[30] = "executes"
+
+    numTechPreps = 20
+    techPrep[1]  = "within":    techPrep[2]  = "beyond":    techPrep[3]  = "throughout":techPrep[4]  = "ahead"
+    techPrep[5]  = "at speed":  techPrep[6]  = "ere long":  techPrep[7]  = "without":   techPrep[8]  = "under"
+    techPrep[9]  = "between":   techPrep[10] = "in phase":  techPrep[11] = "on time":   techPrep[12] = "by hand"
+    techPrep[13] = "per frame": techPrep[14] = "at clock":  techPrep[15] = "across":    techPrep[16] = "until"
+    techPrep[17] = "inside":    techPrep[18] = "around":    techPrep[19] = "past zero": techPrep[20] = "deep down"
+ENDSUB
+
+' ---------------------------------------------------------------------
+' Heuristic Syllable Counter
+' ---------------------------------------------------------------------
+SUB CountSyllables(wStr:STRING), INT
+    INT k, count, lLen
+    STRING cleanStr, ch, nextCh
+    cleanStr = LCASE$(wStr)
+    lLen = LEN(cleanStr)
+
+    IF lLen = 0 THEN RETURN 0
+    IF lLen <= 3 THEN RETURN 1
+
+    count = 0
+    FOR k = 1 TO lLen
+        ch = MID$(cleanStr, k, 1)
+        IF INSTR("aeiouy", ch) > 0 THEN
+            ' Vowel cluster check
+            IF k > 1 THEN
+                nextCh = MID$(cleanStr, k - 1, 1)
+                IF INSTR("aeiouy", nextCh) = 0 THEN count = count + 1
+            ELSE
+                count = count + 1
+            ENDIF
+        ENDIF
+    NEXT k
+
+    ' Adjust for silent 'e' at end of words
+    IF RIGHT$(cleanStr, 1) = "e" AND RIGHT$(cleanStr, 2) <> "le" THEN
+        count = count - 1
+    ENDIF
+
+    IF count <= 0 THEN count = 1
+    RETURN count
+ENDSUB
+
+' ---------------------------------------------------------------------
+' Helper: Pick Random Word by Category (1=Adjective, 2=Noun, 3=Verb, 4=Preposition)
+' ---------------------------------------------------------------------
+SUB PickRandomWord(category:INT), STRING
+    SELECT category
+        CASE 1: RETURN techAd[1 + INT(RND(1.0) * (numTechAd - 1))]
+        CASE 2: RETURN techNoun[1 + INT(RND(1.0) * (numTechNouns - 1))]
+        CASE 3: RETURN techVerb[1 + INT(RND(1.0) * (numTechVerbs - 1))]
+        CASE 4: RETURN techPrep[1 + INT(RND(1.0) * (numTechPreps - 1))]
+    ENDSELECT
+    RETURN ""
+ENDSUB
+
+' ---------------------------------------------------------------------
+' Build Line Targeting Exact Syllable Count 
+' ---------------------------------------------------------------------
+' --- OPTIMIZED STATIC-BUFFER HAIKU GENERATOR ---
+
+SUB BuildHaikuLine(targetSyllables:INT), STRING
+    ' Static buffer to avoid heap allocation per-word
+    STATIC STRING buffer[256] 
+    STRING candidate
+    INT currentSyllables, candSyllables, tries
+    INT i, fillGap
+
+    buffer = ""
+    currentSyllables = 0
+    tries = 0
+
+    WHILE currentSyllables < targetSyllables AND tries < 50
+        tries = tries + 1
+        ' Word picking
+        candidate = PickRandomWord(1 + INT(RND(1.0) * 4))
+        candSyllables = CountSyllables(candidate)
+
+        IF (currentSyllables + candSyllables) <= targetSyllables THEN
+            IF buffer = "" THEN
+                buffer = UCASE$(LEFT$(candidate, 1)) + MID$(candidate, 2)
+            ELSE
+                buffer = buffer + " " + candidate
+            ENDIF
+            currentSyllables = currentSyllables + candSyllables
+        ENDIF
+    WEND
+
+    ' Exact 5-7-5 Fallback Pad
+    IF currentSyllables < targetSyllables THEN
+        fillGap = targetSyllables - currentSyllables
+        FOR i = 1 TO numTechNouns
+            IF CountSyllables(techNoun[i]) = fillGap THEN
+                IF buffer = "" THEN
+                    buffer = UCASE$(LEFT$(techNoun[i], 1)) + MID$(techNoun[i], 2)
+                ELSE
+                    buffer = buffer + " " + techNoun[i]
+                ENDIF
+                BREAK
+            ENDIF
+        NEXT i
+    ENDIF
+
+    RETURN buffer
+ENDSUB
+
+' ---------------------------------------------------------------------
+' Generate Full 5-7-5 Haiku
+' ---------------------------------------------------------------------
+/*
+ *  Startup Pre-cached Haiku Engine
+ */
+
+SUB GenerateStrictHaiku()
+    STATIC INT poolInited = 0
+    STATIC STRING haikuPool1[50]
+    STATIC STRING haikuPool2[50]
+    STATIC STRING haikuPool3[50]
+    INT i, pickIdx
+
+    ' Pre-generate 50 high-quality tech haikus during engine startup
+    IF poolInited = 0 THEN
+        FOR i = 0 TO 49
+            haikuPool1[i] = BuildHaikuLine(5)
+            haikuPool2[i] = BuildHaikuLine(7)
+            haikuPool3[i] = BuildHaikuLine(5)
+        NEXT i
+        poolInited = 1
+    ENDIF
+
+    ' Instant O(1) selection with zero heap allocation stutters during rendering
+    pickIdx = INT(RND(1.0) * 49.0)
+    g_HaikuLine1 = haikuPool1[pickIdx]
+    g_HaikuLine2 = haikuPool2[pickIdx]
+    g_HaikuLine3 = haikuPool3[pickIdx]
+ENDSUB
+
+
+
+' ---------------------------------------------------------------------
+' Render Haiku Overlay Direct to Engine Pixel Buffer
+' ---------------------------------------------------------------------
+SUB RenderHaikuOverlayDirect(pPixelBuffer:POINTER, screenW:INT, screenH:INT, phaseVal:DOUBLE)
+    INT col, calcPhase
+    INT scaleFX, charSpacing, baseScale
+    INT line1X, line2X, line3X
+    INT cx, cy, len1, len2, len3, maxLen
+    
+    ' Calculate resolution-proportional base scale (98304 at 800px width)
+    ' Equivalent to scale factor of 1.5 in fixed-point 16.16 (1.5 * 65536)
+    baseScale = (screenW * 122) 
+    
+    ' Identify the longest line to determine horizontal bounds constraints
+    len1 = LEN(g_HaikuLine1)
+    len2 = LEN(g_HaikuLine2)
+    len3 = LEN(g_HaikuLine3)
+    
+    maxLen = len1
+    IF len2 > maxLen THEN maxLen = len2
+    IF len3 > maxLen THEN maxLen = len3
+
+    ' If character count threatens viewport overflow, scale font down linearly
+    IF maxLen > 24 THEN
+        scaleFX = (baseScale * 24) / maxLen
+    ELSE
+        scaleFX = baseScale
+    ENDIF
+    
+    ' Calculate absolute spacing for vector fonts
+    charSpacing = (18 * scaleFX) >> 16
+    cx = screenW / 2
+    cy = screenH / 2
+
+    calcPhase = INT(phaseVal * 30.0) & 255
+    col = GetCycleColor(calcPhase)
+
+    ' Calculate centered X coordinates using the dynamically computed character spacing
+    line1X = cx - ((len1 * charSpacing) / 2)
+    line2X = cx - ((len2 * charSpacing) / 2)
+    line3X = cx - ((len3 * charSpacing) / 2)
+
+    ' Render lines to the DIB pipeline buffer
+    IF len1 > 0 THEN DrawVectorStringDirect(pPixelBuffer, screenW, screenH, g_HaikuLine1, line1X, cy - 40, scaleFX, col)
+    IF len2 > 0 THEN DrawVectorStringDirect(pPixelBuffer, screenW, screenH, g_HaikuLine2, line2X, cy - 10, scaleFX, col)
+    IF len3 > 0 THEN DrawVectorStringDirect(pPixelBuffer, screenW, screenH, g_HaikuLine3, line3X, cy + 20, scaleFX, col)
+ENDSUB
+
+
+SUB DrawVectorStringDirect(pBuffer:POINTER, screenW:INT, screenH:INT, textStr:STRING, posX:INT, posY:INT, scaleFX:INT, penColor:INT)
+    INT i, charCode, currentX, charSpacing
+    POINTER pStr
+    
+    charSpacing = (18 * scaleFX) >> 16
+    currentX = posX
+    pStr = &textStr
+
+    FOR i = 0 TO LEN(textStr) - 1
+        charCode = *<CHAR>(pStr + i)
+        
+        IF charCode = 32 THEN
+            currentX = currentX + charSpacing
+        ELSE
+            DrawVectorCharDirect(pBuffer, screenW, screenH, charCode, currentX, posY, scaleFX, penColor)
+            currentX = currentX + charSpacing
+        ENDIF
+    NEXT i
+ENDSUB
+
+SUB DrawDottedLineDirect2X(pBuffer:POINTER, screenW:INT, screenH:INT, x1:INT, y1:INT, x2:INT, y2:INT, penColor:INT)
+    INT dx, dy, sx, sy, err, e2, stepCount
+    POINTER pPixel
+
+    dx = ABS(x2 - x1)
+    dy = -ABS(y2 - y1)
+
+    IF x1 < x2 THEN sx = 1 ELSE sx = -1
+    IF y1 < y2 THEN sy = 1 ELSE sy = -1
+
+    err = dx + dy
+    stepCount = 0
+
+    WHILE 1
+        IF (stepCount % 3) = 0 THEN
+            IF x1 >= 0 AND (x1 + 1) < screenW AND y1 >= 0 AND (y1 + 1) < screenH THEN
+                pPixel = pBuffer + ((y1 * screenW + x1) * 4)
+                *<INT>pPixel = penColor
+                *<INT>(pPixel + 4) = penColor
+                *<INT>(pPixel + (screenW * 4)) = penColor
+                *<INT>(pPixel + (screenW * 4) + 4) = penColor
+            ENDIF
+        ENDIF
+        stepCount = stepCount + 1
+
+        IF x1 = x2 AND y1 = y2 THEN BREAK
+        e2 = 2 * err
+        IF e2 >= dy THEN 
+            err = err + dy
+            x1 = x1 + sx
+        ENDIF
+        IF e2 <= dx THEN 
+            err = err + dx
+            y1 = y1 + sy
+        ENDIF
+    ENDWHILE
+ENDSUB
+
+SUB DrawDottedLineDirect4X(pBuffer:POINTER, screenW:INT, screenH:INT, x1:INT, y1:INT, x2:INT, y2:INT, penColor:INT)
+    INT dx, dy, sx, sy, err, e2, stepCount, qx, qy
+    POINTER pPixel
+
+    dx = ABS(x2 - x1)
+    dy = -ABS(y2 - y1)
+
+    IF x1 < x2 THEN sx = 1 ELSE sx = -1
+    IF y1 < y2 THEN sy = 1 ELSE sy = -1
+
+    err = dx + dy
+    stepCount = 0
+
+    WHILE 1
+        IF (stepCount % 4) = 0 THEN
+            IF x1 >= 0 AND (x1 + 3) < screenW AND y1 >= 151 AND (y1 + 3) < (screenH - 151) THEN
+                FOR qy = 0 TO 3
+                    pPixel = pBuffer + (((y1 + qy) * screenW + x1) * 4)
+                    FOR qx = 0 TO 3
+                        *<INT>(pPixel + (qx * 4)) = penColor
+                    NEXT qx
+                NEXT qy
+            ENDIF
+        ENDIF
+        stepCount = stepCount + 1
+
+        IF x1 = x2 AND y1 = y2 THEN BREAK
+        e2 = 2 * err
+        IF e2 >= dy THEN 
+            err = err + dy
+            x1 = x1 + sx
+        ENDIF
+        IF e2 <= dx THEN 
+            err = err + dx
+            y1 = y1 + sy
+        ENDIF
+    ENDWHILE
+ENDSUB
+
+SUB DrawSpinningCubeDirect(pBuffer:POINTER, screenW:INT, screenH:INT, penColor:INT)
+    DEF i, px[8], py[8]:INT
+    FLOAT x, y, z, xy, baseScale, finalScale
+
+    rotX = rotX + 0.025
+    rotY = rotY + 0.035
+    rotZ = rotZ + 0.015
+
+    baseScale = 160.0
+    finalScale = baseScale
+
+    FOR i = 0 TO 7
+        y = cubeY[i] * COS(rotX) - cubeZ[i] * SIN(rotX)
+        z = cubeY[i] * SIN(rotX) + cubeZ[i] * COS(rotX)
+        x = cubeX[i] * COS(rotY) + z * SIN(rotY)
+        z = -cubeX[i] * SIN(rotY) + z * COS(rotY)
+        xy = x * COS(rotZ) - y * SIN(rotZ)
+        y = x * SIN(rotZ) + y * COS(rotZ)
+        x = xy
+
+        px[i] = cx + INT(x * finalScale)
+        py[i] = cy + INT(y * finalScale)
+    NEXT i
+
+    FOR i = 0 TO 3
+        DrawDottedLineDirect4X(pBuffer, screenW, screenH, px[i], py[i], px[(i+1)%4], py[(i+1)%4], penColor)
+        DrawDottedLineDirect4X(pBuffer, screenW, screenH, px[i+4], py[i+4], px[((i+1)%4)+4], py[((i+1)%4)+4], penColor)
+        DrawDottedLineDirect4X(pBuffer, screenW, screenH, px[i], py[i], px[i+4], py[i+4], penColor)
+    NEXT i
+
+    DrawFaceGridDirect(pBuffer, screenW, screenH, px[0], py[0], px[1], py[1], px[2], py[2], px[3], py[3], penColor)
+    DrawFaceGridDirect(pBuffer, screenW, screenH, px[4], py[4], px[5], py[5], px[6], py[6], px[7], py[7], penColor)
+    DrawFaceGridDirect(pBuffer, screenW, screenH, px[3], py[3], px[0], py[0], px[4], py[4], px[7], py[7], penColor)
+    DrawFaceGridDirect(pBuffer, screenW, screenH, px[1], py[1], px[2], py[2], px[6], py[6], px[5], py[5], penColor)
+    DrawFaceGridDirect(pBuffer, screenW, screenH, px[3], py[3], px[2], py[2], px[6], py[6], px[7], py[7], penColor)
+    DrawFaceGridDirect(pBuffer, screenW, screenH, px[0], py[0], px[1], py[1], px[5], py[5], px[4], py[4], penColor)
+ENDSUB
+
+SUB DrawFaceGridDirect(pBuffer:POINTER, screenW:INT, screenH:INT, x0:INT, y0:INT, x1:INT, y1:INT, x2:INT, y2:INT, x3:INT, y3:INT, penColor:INT)
+    INT mx1, my1, mx2, my2
+
+    mx1 = (x0 + x1) / 2: my1 = (y0 + y1) / 2
+    mx2 = (x2 + x3) / 2: my2 = (y2 + y3) / 2
+    DrawDottedLineDirect2X(pBuffer, screenW, screenH, mx1, my1, mx2, my2, penColor)
+
+    mx1 = (x1 + x2) / 2: my1 = (y1 + y2) / 2
+    mx2 = (x3 + x0) / 2: my2 = (y3 + y0) / 2
+    DrawDottedLineDirect2X(pBuffer, screenW, screenH, mx1, my1, mx2, my2, penColor)
+ENDSUB
+
+SUB DrawCubeEffectDirectTransparent4X(pBuffer:POINTER, screenW:INT, screenH:INT)
+    INT i, edgeIdx, v1, v2
+    INT leftX, centerX, rightX
+    INT x1, y1, x2, y2
+    FLOAT vx, vy, vz, rx, ry, rz, scale
+
+    centerX = screenW / 2
+    leftX   = centerX - 280
+    rightX  = centerX + 280
+
+    rotX = rotX + 0.025
+    rotY = rotY + 0.035
+    scale = 55.0 * (1.0 + (g_beatPulse * 0.30))
+
+    FOR i = 0 TO 7
+        vx = cubeVerts[i * 3]     * scale
+        vy = cubeVerts[i * 3 + 1] * scale
+        vz = cubeVerts[i * 3 + 2] * scale
+
+        ry = vy * COS(rotX) - vz * SIN(rotX)
+        rz = vy * SIN(rotX) + vz * COS(rotX)
+        vy = ry
+
+        rx = vx * COS(rotY) + rz * SIN(rotY)
+        rz = -vx * SIN(rotY) + rz * COS(rotY)
+        vx = rx
+
+        projX[i] = INT((vx * 220.0) / (rz + 260.0))
+        projY[i] = INT((vy * 220.0) / (rz + 260.0))
+    NEXT i
+
+    FOR edgeIdx = 0 TO 11
+        v1 = cubeEdges[edgeIdx * 2]
+        v2 = cubeEdges[edgeIdx * 2 + 1]
+
+        y1 = projY[v1] + (screenH / 2)
+        y2 = projY[v2] + (screenH / 2)
+
+        x1 = projX[v1] + leftX
+        x2 = projX[v2] + leftX
+        DrawDottedLineDirect4X(pBuffer, screenW, screenH, x1, y1, x2, y2, GetCycleColor((INT(phase * 40.0) + 30) % 256))
+
+        x1 = projX[v1] + centerX
+        x2 = projX[v2] + centerX
+        DrawDottedLineDirect4X(pBuffer, screenW, screenH, x1, y1, x2, y2, GetCycleColor((INT(phase * 40.0) + 110) % 256))
+
+        x1 = projX[v1] + rightX
+        x2 = projX[v2] + rightX
+        DrawDottedLineDirect4X(pBuffer, screenW, screenH, x1, y1, x2, y2, GetCycleColor((INT(phase * 40.0) + 190) % 256))
+    NEXT edgeIdx
+ENDSUB
+
+SUB DrawBouncingOverlayNameDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+    STRING textStr
+    INT scaleFX, textColor, calcPhase
+    INT targetY, currentY, startX
+    FLOAT progress, bounceOffset
+
+    IF current_overlay <> lastOverlayIdx THEN
+        lastOverlayIdx = current_overlay
+        bannerDropTimer = 0.0
+    ENDIF
+
+    IF bannerDropTimer < 2.0 THEN
+        bannerDropTimer = bannerDropTimer + 0.05
+    ENDIF
+
+    progress = bannerDropTimer
+    targetY = 40 
+
+    IF progress < 1.0 THEN
+        currentY = -60 + INT(progress * FLOAT(targetY + 60))
+    ELSE
+        bounceOffset = ABS(SIN((progress - 1.0) * 6.28)) * (25.0 / (1.0 + (progress - 1.0) * 4.0))
+        currentY = targetY - INT(bounceOffset)
+    ENDIF
+
+    scaleFX = 65536
+    startX = 30 
+
+    calcPhase = INT(phase * 40.0) & 255
+    textColor = GetCycleColor(calcPhase)
+
+    textStr = effectNames[current_overlay]
+    DrawVectorStringDirect(pBuffer, screenW, screenH, textStr, startX, currentY, scaleFX, textColor)
+ENDSUB
+
+SUB InitRasterbarPhysics()
+    INT i
+    FOR i = 0 TO 7
+        barY[i] = FLOAT(cy - 100 + (i * 32))
+        barVel[i] = 0.0
+    NEXT i
+ENDSUB
+
+SUB DrawAnimatedTitleDirect(pBuffer:POINTER, screenW:INT, screenH:INT, titleText:STRING, targetY:INT)
+    INT i, charCode, currentX, baseY, animY
+    INT scaleFX, charSpacing, offsetIdx, sinVal
+    INT calcPhase, colorPhase, charColor
+    POINTER pStr
+    
+    scaleFX = 85196
+    charSpacing = (18 * scaleFX) >> 16
+    
+    currentX = (screenW / 2) - ((LEN(titleText) * charSpacing) / 2)
+    baseY = targetY
+    calcPhase = INT(phase * 30.0)
+
+    INT shadowX = currentX
+    pStr = &titleText
+    FOR i = 0 TO LEN(titleText) - 1
+        charCode = *<CHAR>(pStr + i)
+        offsetIdx = (calcPhase + ((i + 1) * 12)) & 255
+        sinVal = sinTable[offsetIdx]
+        animY = baseY + ((sinVal * 15) >> 16)
+
+        IF charCode <> 32 THEN
+            DrawVectorCharShadow(pBuffer, screenW, screenH, charCode, shadowX + 2, animY + 2, scaleFX)
+        ENDIF
+        shadowX = shadowX + charSpacing
+    NEXT i
+
+    pStr = &titleText
+    FOR i = 0 TO LEN(titleText) - 1
+        charCode = *<CHAR>(pStr + i)
+        offsetIdx = (calcPhase + ((i + 1) * 12)) & 255
+        sinVal = sinTable[offsetIdx]
+        animY = baseY + ((sinVal * 15) >> 16)
+
+        colorPhase = (calcPhase + ((i + 1) * 16)) & 255
+        charColor = GetCycleColor(colorPhase)
+
+        IF charCode <> 32 THEN
+            DrawVectorCharDirect(pBuffer, screenW, screenH, charCode, currentX, animY, scaleFX, charColor)
+        ENDIF
+        currentX = currentX + charSpacing
+    NEXT i
+ENDSUB
+
+SUB InitAndPlayAudioFromResource(resID:INT), INT
+    INT hMod, hRes, hGlobal, resSize
+    POINTER pMemData
+
+    hMod = GetModuleHandleA(0)
+    IF hMod = 0 THEN RETURN 0
+
+    hRes = FindResourceA(hMod, "#1000", "RCDATA")
+    IF hRes = 0 THEN hRes = FindResourceA(hMod, "#1000", "#10")
+    IF hRes = 0 THEN hRes = FindResourceA(hMod, "#1000", "#333")
+
+    IF hRes = 0 THEN RETURN 0
+
+    resSize = SizeofResource(hMod, hRes)
+    IF resSize <= 0 THEN RETURN 0
+
+    hGlobal = API_LoadResource(hMod, hRes)
+    IF hGlobal = 0 THEN RETURN 0
+
+    pMemData = LockResource(hGlobal)
+    IF pMemData = 0 THEN RETURN 0
+
+    g_pResMemData = pMemData
+    g_nResMemSize = resSize
+
+    FSOUND_File_SetCallbacks(&memopen, &memclose, &memread, &memseek, &memtell)
+
+    g_pMiniFmodSong = FMUSIC_LoadSong("RAM_STREAM", NULL)
+
+    IF g_pMiniFmodSong <> 0 THEN
+        FMUSIC_PlaySong(g_pMiniFmodSong)
+        RETURN 1
+    ENDIF
+
+    g_pResMemData = 0
+    g_nResMemSize = 0
+    RETURN 0
+ENDSUB
+
+SUB UpdateAudioPulse()
+    INT currentRow = 0
+
+    IF g_pMiniFmodSong <> 0 THEN
+        currentRow = FMUSIC_GetRow(g_pMiniFmodSong)
+        
+        IF currentRow <> g_lastRow THEN
+            g_lastRow = currentRow
+            IF (currentRow % 4) = 0 THEN
+                g_beatPulse = 1.0  ' Instant full pulse on the beat
+            ENDIF
+        ENDIF
+    ENDIF
+
+    g_beatPulse = g_beatPulse * 0.88
+    IF g_beatPulse < 0.01 THEN g_beatPulse = 0.0
+ENDSUB
+
+SUB StopAndFreeAudio()
+    IF g_pMiniFmodSong <> 0 THEN
+        FMUSIC_StopSong(g_pMiniFmodSong)
+        FMUSIC_FreeSong(g_pMiniFmodSong)
+        g_pMiniFmodSong = 0
+    ENDIF
+    
+    g_pResMemData = 0
+    g_nResMemSize = 0
+ENDSUB
+
+SUB memopen(pname:STRING), POINTER
+    POINTER memfile = NEW(tMEMFILE, 1)
+    SETTYPE memfile, tMEMFILE
+
+    IF g_pResMemData <> 0 AND g_nResMemSize > 0 THEN
+        #memfile.length = g_nResMemSize
+        #memfile.pdata   = g_pResMemData
+        #memfile.pos     = 0
+        RETURN memfile
+    ENDIF
+
+    INT sepPos = INSTR(pname, "|")
+    If sepPos > 0 THEN
+        INT addrVal = VAL(LEFT$(pname, sepPos - 1))
+        INT sizeVal = VAL(MID$(pname, sepPos + 1))
+        
+        POINTER pResMem = addrVal
+        
+        #memfile.length = sizeVal
+        #memfile.pdata   = pResMem
+        #memfile.pos     = 0
+        RETURN memfile
+    ENDIF
+
+    DEF myfile AS BFILE
+    IF OPENFILE(myfile, pname, "R") = 0 THEN
+        POINTER mtemp = NEW(CHAR, LEN(myfile))
+        #memfile.length = LEN(myfile)
+        __READ myfile, ##<MEMORY>mtemp, #memfile.length
+        #memfile.pdata = mtemp
+        #memfile.pos = 0
+        CLOSEFILE myfile
+    ELSE
+        DELETE memfile
+        memfile = NULL
+    ENDIF
+
+    RETURN memfile
+ENDSUB
+
+SUB memclose(handle:POINTER)
+    SETTYPE handle, tMEMFILE
+    IF handle <> 0 THEN
+        DELETE handle
+    ENDIF
+ENDSUB
+
+SUB memread(buffer:POINTER, size:INT, handle:POINTER), INT
+    SETTYPE handle, tMEMFILE
+    IF handle = 0 OR buffer = 0 THEN RETURN 0
+    IF (#handle.pos + size >= #handle.length) THEN 
+        size = #handle.length - #handle.pos
+    ENDIF
+    IF size > 0 THEN
+        RtlMoveMemory(buffer, #handle.pdata + #handle.pos, size)
+        #handle.pos += size
+        RETURN size
+    ENDIF
+    RETURN 0
+ENDSUB
+
+SUB memseek(handle:POINTER, pos:INT, mode:SCHAR)
+    SETTYPE handle, tMEMFILE
+    SELECT mode
+        CASE 0
+            #handle.pos = pos
+        CASE 1
+            #handle.pos += pos
+        CASE 2
+            #handle.pos = #handle.length + pos
+    ENDSELECT
+    IF (#handle.pos > #handle.length) THEN #handle.pos = #handle.length
+ENDSUB
+
+SUB memtell(handle:POINTER), INT
+    SETTYPE handle, tMEMFILE
+    RETURN #handle.pos
+ENDSUB
+
+SUB InitCheckerboardBitmap()
+    INT x, y, tileSize, allocH
+    INT color1, color2, activeColor
+    INT gridX, gridY
+    POINTER pPixel
+    tileSize = 32
+    color1 = 0xFF202020
+    color2 = 0xFF0A0A0A
+    
+    allocH = screenH + tileSize
+    IF g_pCheckerBuffer <> 0 THEN FREEMEM g_pCheckerBuffer
+    ALLOCMEM(g_pCheckerBuffer, screenW * allocH, 4)
+    FOR y = 0 TO allocH - 1
+        gridY = (y / tileSize) % 2
+        pPixel = g_pCheckerBuffer + (y * screenW * 4)
+
+        FOR x = 0 TO screenW - 1
+            gridX = (x / tileSize) % 2
+            IF ((gridX + gridY) % 2) = 0 THEN
+                activeColor = color1
+            ELSE
+                activeColor = color2
+            ENDIF
+            *<INT>pPixel = activeColor
+            pPixel = pPixel + 4
+        NEXT x
+    NEXT y
+ENDSUB
+
+SUB DrawScrollingCheckerboardDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+    INT scrollY, tileSize, cyclePeriod
+    INT viewYStart, viewHeight, numDwords
+    POINTER pDst, pSrc
+    IF g_pCheckerBuffer = 0 THEN InitCheckerboardBitmap()
+    tileSize = 32
+    cyclePeriod = tileSize * 2
+    scrollY = INT(phase * 8.0) % cyclePeriod
+    viewYStart = 152
+    viewHeight = screenH - 304
+    pDst = pBuffer + (viewYStart * screenW * 4)
+    pSrc = g_pCheckerBuffer + ((viewYStart + scrollY) * screenW * 4)
+    numDwords = (viewHeight * screenW)
+    g_pAsmDst = pDst
+    g_pAsmSrc = pSrc
+    g_asmCount = numDwords
+    _asm
+        push esi
+        push edi
+        mov edi, [g_pAsmDst]
+        mov esi, [g_pAsmSrc]
+        mov ecx, [g_asmCount]
+        rep movsd
+        pop edi
+        pop esi
+    _endasm
+ENDSUB
+
+SUB InitVectorFontData()
+    DEF i, j, charVal:INT
+    
+    FOR i = 1 TO MAX_SCROLL_LETTERS
+        FOR j = 1 TO 3
+            fontGridX[1, j, i] = -12.0
+            fontGridX[2, j, i] =   0.0
+            fontGridX[3, j, i] =  12.0
+
+            fontGridY[j, 1, i] = -14.0
+            fontGridY[j, 2, i] =   0.0
+            fontGridY[j, 3, i] =  14.0
+
+            fontGridZ[j, 1, i] = 1.0
+            fontGridZ[j, 2, i] = 1.0
+            fontGridZ[j, 3, i] = 1.0
+        NEXT j
+    NEXT i
+
+    RESTORE font_data_start
+    FOR charVal = 1 TO 65
+        FOR i = 1 TO 20
+            GETDATA font_data_start, letterStruct[i, charVal]
+        NEXT i
+    NEXT charVal
+
+    scrollIndex = 1
+    scrollXPos = 0.0
+    scrollText = "    &&& A 60 FPS HYBRID COMPO BUILT IN IWBASIC THAT BUNDLES DIRECT-RAM DIB SECTION RENDERING & SSE2 MOTION TRAIL DECAY"
+    scrollText = scrollText + "  & CUSTOM EMBEDDED MINI-FMOD RESOURCE STREAMING & REAL TIME 3D VECTOR MATH &&&    "
+    scrollText = scrollText + "SIT BACK, TURN UP THE VOLUME, AND ENJOY THE TRIP... "
+ENDSUB
+
+SUB DrawVectorSegments(pBuffer:POINTER, sW:INT, sH:INT, charIdx:INT, penColor:INT)
+    IF charIdx < 1 OR charIdx > 65 THEN RETURN
+
+    IF letterStruct[1, charIdx]  THEN DrawLineDirect(pBuffer, sW, sH, projX1[1,1], projY1[1,1], projX1[1,2], projY1[1,2], penColor)
+    IF letterStruct[2, charIdx]  THEN DrawLineDirect(pBuffer, sW, sH, projX1[1,2], projY1[1,2], projX1[1,3], projY1[1,3], penColor)
+    IF letterStruct[3, charIdx]  THEN DrawLineDirect(pBuffer, sW, sH, projX1[1,3], projY1[1,3], projX1[2,3], projY1[2,3], penColor)
+    IF letterStruct[4, charIdx]  THEN DrawLineDirect(pBuffer, sW, sH, projX1[2,3], projY1[2,3], projX1[3,3], projY1[3,3], penColor)
+    IF letterStruct[5, charIdx]  THEN DrawLineDirect(pBuffer, sW, sH, projX1[3,3], projY1[3,3], projX1[3,2], projY1[3,2], penColor)
+    IF letterStruct[6, charIdx]  THEN DrawLineDirect(pBuffer, sW, sH, projX1[3,2], projY1[3,2], projX1[3,1], projY1[3,1], penColor)
+    IF letterStruct[7, charIdx]  THEN DrawLineDirect(pBuffer, sW, sH, projX1[3,1], projY1[3,1], projX1[2,1], projY1[2,1], penColor)
+    IF letterStruct[8, charIdx]  THEN DrawLineDirect(pBuffer, sW, sH, projX1[2,1], projY1[2,1], projX1[1,1], projY1[1,1], penColor)
+
+    IF letterStruct[9, charIdx]  THEN DrawLineDirect(pBuffer, sW, sH, projX1[2,1], projY1[2,1], projX1[2,2], projY1[2,2], penColor)
+    IF letterStruct[10, charIdx] THEN DrawLineDirect(pBuffer, sW, sH, projX1[2,2], projY1[2,2], projX1[2,3], projY1[2,3], penColor)
+    IF letterStruct[11, charIdx] THEN DrawLineDirect(pBuffer, sW, sH, projX1[1,2], projY1[1,2], projX1[2,2], projY1[2,2], penColor)
+    IF letterStruct[12, charIdx] THEN DrawLineDirect(pBuffer, sW, sH, projX1[2,2], projY1[2,2], projX1[3,2], projY1[3,2], penColor)
+
+    IF letterStruct[13, charIdx] THEN DrawLineDirect(pBuffer, sW, sH, projX1[1,1], projY1[1,1], projX1[2,2], projY1[2,2], penColor)
+    IF letterStruct[14, charIdx] THEN DrawLineDirect(pBuffer, sW, sH, projX1[2,2], projY1[2,2], projX1[3,3], projY1[3,3], penColor)
+    IF letterStruct[15, charIdx] THEN DrawLineDirect(pBuffer, sW, sH, projX1[3,1], projY1[3,1], projX1[2,2], projY1[2,2], penColor)
+    IF letterStruct[16, charIdx] THEN DrawLineDirect(pBuffer, sW, sH, projX1[2,2], projY1[2,2], projX1[1,3], projY1[1,3], penColor)
+    IF letterStruct[17, charIdx] THEN DrawLineDirect(pBuffer, sW, sH, projX1[2,1], projY1[2,1], projX1[1,2], projY1[1,2], penColor)
+    IF letterStruct[18, charIdx] THEN DrawLineDirect(pBuffer, sW, sH, projX1[2,1], projY1[2,1], projX1[3,2], projY1[3,2], penColor)
+    IF letterStruct[19, charIdx] THEN DrawLineDirect(pBuffer, sW, sH, projX1[1,2], projY1[1,2], projX1[2,3], projY1[2,3], penColor)
+    IF letterStruct[20, charIdx] THEN DrawLineDirect(pBuffer, sW, sH, projX1[3,2], projY1[3,2], projX1[2,3], projY1[2,3], penColor)
+ENDSUB
+
+SUB Render3DVectorScroller(pBuffer:POINTER, screenW:INT, screenH:INT, penColor:INT)
+    DEF i, x, y, charCode:INT
+    FLOAT scaleFactor
+    FLOAT lX, lY, lZ, vx, vy, vz, vxx, vyy, vzz, vdiv
+    FLOAT waveOffset
+    
+    STATIC INT fixedScrollX = 0
+    INT fixedJumpGap = INT(28.0 * 65536.0)
+    INT fixedSpeed = INT(2.0 * 65536.0)
+    INT currentFixedOffset
+    INT baseScreenFixedX
+    
+    STATIC FLOAT scrollPhase = 0.0
+    scaleFactor = 12.0
+
+    INT bufferSize = screenW * screenH * 4
+    INT topY = INT(FLOAT(screenH) * 0.78)
+    INT bottomY = screenH
+    INT topOffset = topY * screenW * 4
+    INT regionQuadCount = ((bottomY - topY) * screenW) / 4
+
+    IF g_pTextLayer = NULL THEN
+        ALLOCMEM(g_pTextLayer, bufferSize, 1)
+        g_pAsmPixel = g_pTextLayer
+        g_asmCount = bufferSize / 4
+        _asm
+            mov edi, [g_pAsmPixel]
+            mov ecx, [g_asmCount]
+            xor eax, eax
+            rep stosd
+        _endasm
+    ELSE
+        g_pAsmPixel = g_pTextLayer + topOffset
+        g_asmCount = regionQuadCount
+
+        _asm
+            push edi
+            mov edi, [g_pAsmPixel]
+            mov ecx, [g_asmCount]
+            
+            mov eax, 0x007F7F7F
+            movd xmm2, eax
+            pshufd xmm2, xmm2, 0x00
+
+        scroller_decay_loop:
+            movdqu xmm0, [edi]
+            pand xmm0, xmm2
+            psrlw xmm0, 1
+            movdqu [edi], xmm0
+            add edi, 16
+            dec ecx
+            jnz scroller_decay_loop
+
+            pop edi
+        _endasm
+    ENDIF
+
+    fixedScrollX = fixedScrollX + fixedSpeed
+    
+    INT totalChars = LEN(scrollText)
+    INT maxScroll = (totalChars * fixedJumpGap) + INT((FLOAT(screenW) + 200.0) * 65536.0)
+    IF fixedScrollX > maxScroll THEN
+        fixedScrollX = 0
+    ENDIF
+
+    scrollPhase = scrollPhase + 0.03
+    scrollRotY = 0.25
+    scrollRotZ = -0.15 + 0.05 * SIN(scrollPhase * 1.5)
+    scrollRotX = 0.85 + 0.15 * COS(scrollPhase * 0.8)
+
+    baseScreenFixedX = INT((FLOAT(screenW) + 50.0) * 65536.0) - fixedScrollX
+
+    INT textPenColor = 0xFF000000 | (penColor & 0x00FFFFFF)
+
+    FOR i = 1 TO totalChars
+        currentFixedOffset = baseScreenFixedX + ((i - 1) * fixedJumpGap)
+        INT screenCheckX = currentFixedOffset >> 16
+        
+        IF screenCheckX >= -400 AND screenCheckX <= screenW + 100 THEN
+            FLOAT fCurrentXOffset = FLOAT(currentFixedOffset) / 65536.0
+            
+            waveOffset = 10.0 * SIN((fCurrentXOffset * 0.015) + (scrollPhase * 2.0)) + _
+                         4.0 * COS((fCurrentXOffset * 0.030) - (scrollPhase * 3.0)) - _
+                         (g_beatPulse * 16.0)
+            
+            FOR x = 1 TO 3
+                FOR y = 1 TO 3
+                    IF x = 1 THEN lX = -12.0
+                    IF x = 2 THEN lX = 0.0
+                    IF x = 3 THEN lX = 12.0
+
+                    IF y = 1 THEN lY = -14.0
+                    IF y = 2 THEN lY = 0.0
+                    IF y = 3 THEN lY = 14.0
+                    
+                    lZ = 1.0
+
+                    vyy = lY * COS(scrollRotX) + lZ * SIN(scrollRotX)
+                    vzz = lZ * COS(scrollRotX) - lY * SIN(scrollRotX)
+                    vy = vyy
+
+                    vxx = lX * COS(scrollRotY) - vzz * SIN(scrollRotY)
+                    vzz = lX * SIN(scrollRotY) + vzz * COS(scrollRotY)
+
+                    vx = vxx * COS(scrollRotZ) - vy * SIN(scrollRotZ)
+                    vy = vxx * SIN(scrollRotZ) + vy * COS(scrollRotZ)
+
+                    vx = vx + fCurrentXOffset
+                    vz = vzz + 7.0
+
+                    vdiv = (vz / 55.0) + 7.5
+                    
+                    projX1[x, y] = INT((scaleFactor * (vx / vdiv)) + (FLOAT(screenW) * 0.5))
+                    projY1[x, y] = INT((scaleFactor * (vy / vdiv)) + (FLOAT(screenH) * 0.88) + waveOffset)
+                NEXT y
+            NEXT x
+
+            charCode = ASC(MID$(scrollText, i, 1)) - 31
+            IF charCode >= 1 AND charCode <= 65 THEN
+                DrawVectorSegments(g_pTextLayer, screenW, screenH, charCode, textPenColor)
+            ENDIF
+        ENDIF
+    NEXT i
+
+    g_pAsmPixel = pBuffer + topOffset
+    g_pAsmSrc = g_pTextLayer + topOffset
+    g_asmCount = regionQuadCount
+
+    _asm
+        push edi
+        push esi
+        mov edi, [g_pAsmPixel]
+        mov esi, [g_pAsmSrc]
+        mov ecx, [g_asmCount]
+
+    scroller_blend_loop:
+        movdqu xmm0, [edi]
+        movdqu xmm1, [esi]
+        paddusb xmm0, xmm1
+        movdqu [edi], xmm0
+        
+        add edi, 16
+        add esi, 16
+        dec ecx
+        jnz scroller_blend_loop
+
+        pop esi
+        pop edi
+    _endasm
+ENDSUB
+
+SUB FillQuadDirect(pBuffer:POINTER, sW:INT, sH:INT, x0:INT, y0:INT, x1:INT, y1:INT, x2:INT, y2:INT, x3:INT, y3:INT, fillColor:INT)
+    INT minY = y0 : IF y1 < minY THEN minY = y1
+    IF y2 < minY THEN minY = y2
+    IF y3 < minY THEN minY = y3
+
+    INT maxY = y0 : IF y1 > maxY THEN maxY = y1
+    IF y2 > maxY THEN maxY = y2
+    IF y3 > maxY THEN maxY = y3
+
+    IF minY < 157 THEN minY = 157
+    IF maxY >= (sH - 161) THEN maxY = sH - 162
+    IF minY >= maxY THEN RETURN
+
+    INT y, startX, endX, spanW, tempX
+
+    FOR y = minY TO maxY
+        startX = 99999
+        endX   = -99999
+
+        IF (y0 <= y AND y < y1) OR (y1 <= y AND y < y0) THEN
+            IF y0 <> y1 THEN
+                tempX = x0 + INT(FLOAT(y - y0) * FLOAT(x1 - x0) / FLOAT(y1 - y0))
+                IF tempX < startX THEN startX = tempX
+                IF tempX > endX THEN endX = tempX
+            ENDIF
+        ENDIF
+
+        IF (y1 <= y AND y < y2) OR (y2 <= y AND y < y1) THEN
+            IF y1 <> y2 THEN
+                tempX = x1 + INT(FLOAT(y - y1) * FLOAT(x2 - x1) / FLOAT(y2 - y1))
+                IF tempX < startX THEN startX = tempX
+                IF tempX > endX THEN endX = tempX
+            ENDIF
+        ENDIF
+
+        IF (y2 <= y AND y < y3) OR (y3 <= y AND y < y2) THEN
+            IF y2 <> y3 THEN
+                tempX = x2 + INT(FLOAT(y - y2) * FLOAT(x3 - x2) / FLOAT(y3 - y2))
+                IF tempX < startX THEN startX = tempX
+                IF tempX > endX THEN endX = tempX
+            ENDIF
+        ENDIF
+
+        IF (y3 <= y AND y < y0) OR (y0 <= y AND y < y3) THEN
+            IF y3 <> y0 THEN
+                tempX = x3 + INT(FLOAT(y - y3) * FLOAT(x0 - x3) / FLOAT(y0 - y3))
+                IF tempX < startX THEN startX = tempX
+                IF tempX > endX THEN endX = tempX
+            ENDIF
+        ENDIF
+
+        IF startX < 45 THEN startX = 45
+        IF endX >= (sW - 45) THEN endX = sW - 46
+
+        spanW = endX - startX
+        IF spanW > 0 THEN
+            g_pAsmPixel = pBuffer + ((y * sW + startX) * 4)
+            g_asmPixelColor = fillColor
+            g_asmCount = spanW
+            _asm
+                push edi
+                mov edi, [g_pAsmPixel]
+                mov eax, [g_asmPixelColor]
+                mov ecx, [g_asmCount]
+                rep stosd
+                pop edi
+            _endasm
+        ENDIF
+    NEXT y
+ENDSUB
+
+SUB Draw3DGridMeshDirect(pBuffer:POINTER, screenW:INT, screenH:INT, penColor:INT)
+    STATIC INT gridX[25, 25], gridY[25, 25]
+    STATIC FLOAT gridZ[25, 25]
+    
+    DEF x, y, col:INT
+    DEF x0, y0, x1, y1, x2, y2, x3, y3:INT
+    DEF texU, texV:INT
+    DEF lineColor:INT
+    DEF zShade:INT
+    DEF colorIdx, baseRGB:INT
+    DEF r, g, b:INT
+    
+    FLOAT rx, ry, rz, tx, ty, pdiv
+    FLOAT rotX, rotY, mag, ty2, tz2, avgZ
+    FLOAT beatBounce
+    
+    INT cx = screenW / 2
+    INT cy = screenH / 2
+
+    INT k1Val = INT(SIN(phase) * 128.0)
+    PlasmaTextureGenerator(k1Val)
+
+    mag = 240.0 + 30.0 * SIN(phase * 0.8)
+    rotX = 0.15 * SIN(phase * 0.5)
+    rotY = phase * 0.25
+
+    FOR y = 0 TO 24
+        FOR x = 0 TO 24
+            rx = (FLOAT(x) - 12.0) * 0.38
+            ry = (FLOAT(y) - 12.0) * 0.38
+            
+            beatBounce = 0.55 + (g_beatPulse * 0.40)
+            rz = beatBounce * SIN((rx * 1.6) + phase) + beatBounce * COS((ry * 1.6) - (phase * 1.2))
+
+            tx = rx * COS(rotY) - ry * SIN(rotY)
+            ty = rx * SIN(rotY) + ry * COS(rotY)
+            
+            ty2 = ty * COS(rotX) - rz * SIN(rotX)
+            tz2 = ty * SIN(rotX) + rz * COS(rotX) + 6.8
+
+            gridZ[x, y] = tz2
+
+            IF tz2 > 1.2 THEN
+                pdiv = tz2 / 5.2
+                gridX[x, y] = cx + INT((tx * mag) / pdiv)
+                gridY[x, y] = cy + INT((ty2 * mag) / pdiv)
+            ELSE
+                gridX[x, y] = -9999
+                gridY[x, y] = -9999
+            ENDIF
+        NEXT x
+    NEXT y
+
+    FOR y = 23 TO 0 STEP -1
+        FOR x = 0 TO 23
+            x0 = gridX[x, y]     : y0 = gridY[x, y]
+            x1 = gridX[x + 1, y] : y1 = gridY[x + 1, y]
+            x2 = gridX[x + 1, y + 1] : y2 = gridY[x + 1, y + 1]
+            x3 = gridX[x, y + 1] : y3 = gridY[x, y + 1]
+
+            IF x0 <> -9999 AND x1 <> -9999 AND x2 <> -9999 AND x3 <> -9999 THEN
+                IF x0 > -200 AND x0 < (screenW + 200) AND y0 > -200 AND y0 < (screenH + 200) THEN
+                    
+                    texU = (x * 5 + INT(phase * 25.0)) & 127
+                    texV = (y * 5 + INT(phase * 15.0)) & 127
+                    col = tunnel_texture[texU + (texV * 128)]
+
+                    IF current_overlay = 13 THEN 
+                        FillQuadDirect(pBuffer, screenW, screenH, x0, y0, x1, y1, x2, y2, x3, y3, col)
+                    ENDIF
+
+                    colorIdx = (INT(phase * 50.0) + (x * 4) + (y * 6)) & 255
+                    baseRGB = GetCycleColor(colorIdx)
+
+                    avgZ = (gridZ[x, y] + gridZ[x + 1, y] + gridZ[x + 1, y + 1] + gridZ[x, y + 1]) * 0.25
+                    zShade = 255 - INT((avgZ - 2.0) * 28.0)
+                    IF zShade < 40 THEN zShade = 40
+                    IF zShade > 255 THEN zShade = 255
+
+                    r = ((((baseRGB >> 16) & 0xFF) * zShade) >> 8)
+                    g = ((((baseRGB >> 8) & 0xFF) * zShade) >> 8)
+                    b = (((baseRGB & 0xFF) * zShade) >> 8)
+
+                    lineColor = 0xFF000000 | (r << 16) | (g << 8) | b
+
+                    DrawLineDirect(pBuffer, screenW, screenH, x0, y0, x1, y1, lineColor)
+                    DrawLineDirect(pBuffer, screenW, screenH, x1, y1, x2, y2, lineColor)
+                    DrawLineDirect(pBuffer, screenW, screenH, x2, y2, x3, y3, lineColor)
+                    DrawLineDirect(pBuffer, screenW, screenH, x3, y3, x0, y0, lineColor)
+                ENDIF
+            ENDIF
+        NEXT x
+    NEXT y
+ENDSUB
+
+SUB InitTunnelEngine(w:INT, h:INT)
+    INT i, x, y, idx
+    INT vVal, widthVal
+    FLOAT distVal, angleVal
+
+    FOR i = -1024 TO 2047
+        fsin1[i + 1024] = INT(SIN(FLOAT(i) / 20.0) * 106.0)
+        fsin2[i + 1024] = INT(SIN(FLOAT(i) / 32.0) * 64.0 + SIN(FLOAT(i) / 64.0) * 64.0)
+        fsin3[i + 1024] = INT(SIN(FLOAT(i) / 24.0) * 92.0)
+    NEXT i
+
+    FOR i = 0 TO 127
+        coloop[i] = i << 1
+        coloop[i + 128] = (255 - (i + 128)) << 1
+    NEXT i
+
+    vVal = 3
+    widthVal = 256
+    IF g_pDistBuffer <> 0 THEN FREEMEM g_pDistBuffer
+    IF g_pAngleBuffer <> 0 THEN FREEMEM g_pAngleBuffer
+    
+    ALLOCMEM(g_pDistBuffer, w * h, 1)
+    ALLOCMEM(g_pAngleBuffer, w * h, 1)
+
+    idx = 0
+    FOR y = -(h / 2) TO (h / 2) - 1
+        FOR x = -(w / 2) TO (w / 2) - 1
+            IF x = 0 AND y = 0 THEN
+                distVal = 1.0
+            ELSE
+                distVal = SQRT(FLOAT(x * x + y * y))
+            ENDIF
+            
+            angleVal = ATAN2(FLOAT(y), FLOAT(x))
+
+            *<CHAR>(g_pDistBuffer + idx)  = INT((FLOAT(widthVal * TNL_TWIDTH) * (1.0 / distVal))) & (TNL_TWIDTH - 1)
+            *<CHAR>(g_pAngleBuffer + idx) = INT((FLOAT(vVal * TNL_TWIDTH) * angleVal / PI_VAL)) & (TNL_THEIGHT - 1)
+            idx++
+        NEXT x
+    NEXT y
+ENDSUB
+
+SUB PlasmaTextureGenerator(k1Val:INT)
+    INT r, g, b, t1, t2, col, y, x
+
+    FOR y = 0 TO (TNL_THEIGHT / 2) - 1
+        t1 = fsin2[y + 1024]
+        t2 = fsin3[y + k1Val + 1024]
+        FOR x = 0 TO (TNL_TWIDTH / 2) - 1
+            r = coloop[(fsin1[x + 1024] + t1 + fsin2[x + k1Val + fsin3[x + t2 + 1024] + 1024] + t2) & 255]
+            g = coloop[(fsin3[x + 1024] + t1 + fsin2[x + k1Val + fsin1[x + t2 + 1024] + 1024] + t2) & 255]
+            b = coloop[(fsin2[x + 1024] + t1 + fsin3[x + t2 + 2048] + t2) & 255]
+
+            col = 0xFF000000 | (r << 16) | (g << 8) | b
+            tunnel_texture[x + (y << TNL_TSHIFT)] = col
+            tunnel_texture[TNL_TWIDTH - x - 1 + (y << TNL_TSHIFT)] = col
+        NEXT x
+    NEXT y
+
+    FOR y = (TNL_THEIGHT / 2) TO TNL_THEIGHT - 1
+        t1 = fsin2[(TNL_THEIGHT - y) + 1024]
+        t2 = fsin3[(TNL_THEIGHT - y) + k1Val + 1024]
+        FOR x = 0 TO (TNL_TWIDTH / 2) - 1
+            r = coloop[(fsin1[x + 1024] + t1 + fsin2[x + k1Val + fsin3[x + t2 + 1024] + 1024] + t2) & 255]
+            g = coloop[(fsin3[x + 1024] + t1 + fsin2[x + k1Val + fsin1[x + t2 + 1024] + 1024] + t2) & 255]
+            b = coloop[(fsin2[x + 1024] + t1 + fsin3[x + k1Val + fsin1[x + t2 + 2048]] + t2) & 255]
+
+            col = 0xFF000000 | (r << 16) | (g << 8) | b
+            tunnel_texture[x + (y << TNL_TSHIFT)] = col
+            tunnel_texture[TNL_TWIDTH - x - 1 + (y << TNL_TSHIFT)] = col
+        NEXT x
+    NEXT y
+ENDSUB
+
+SUB DrawHyperShip(pBuffer:POINTER, screenW:INT, screenH:INT, bankAng:FLOAT, driftX:FLOAT, driftY:FLOAT, tPhase:FLOAT)
+    INT i, ei, ia, ib, bk, hr, hg, hb, ir, ig, ib2, hullCol, innerCol, edgeCol, fk
+    FLOAT sc, yaw, pitch, roll, cyw, syw, cpt, spt, crl, srl
+    FLOAT px, py, pz, x1, z1, y2, z2, x3, y3, sf
+    FLOAT offX, offY
+    FLOAT cx = FLOAT(screenW) * 0.5
+    FLOAT cy = FLOAT(screenH) * 0.5
+    INT topY = 157
+    INT bottomY = screenH - 161
+
+    IF g_shipInit = 0 THEN
+        ' 0 nose, 1/2 wing tips R/L, 3/4 engines R/L, 5 canopy, 6 keel, 7 fin tip, 8 fin rear, 9/10 flame ends R/L
+        g_shipX[0] =   0.0 : g_shipY[0] =   2.0 : g_shipZ[0] =  70.0
+        g_shipX[1] =  62.0 : g_shipY[1] =  -4.0 : g_shipZ[1] = -38.0
+        g_shipX[2] = -62.0 : g_shipY[2] =  -4.0 : g_shipZ[2] = -38.0
+        g_shipX[3] =  16.0 : g_shipY[3] =   0.0 : g_shipZ[3] = -30.0
+        g_shipX[4] = -16.0 : g_shipY[4] =   0.0 : g_shipZ[4] = -30.0
+        g_shipX[5] =   0.0 : g_shipY[5] =  16.0 : g_shipZ[5] = -20.0
+        g_shipX[6] =   0.0 : g_shipY[6] =  -8.0 : g_shipZ[6] = -30.0
+        g_shipX[7] =   0.0 : g_shipY[7] =  34.0 : g_shipZ[7] = -36.0
+        g_shipX[8] =   0.0 : g_shipY[8] =   6.0 : g_shipZ[8] = -34.0
+        g_shipX[9] =  16.0 : g_shipY[9] =   0.0 : g_shipZ[9] = -50.0
+        g_shipX[10] = -16.0 : g_shipY[10] = 0.0 : g_shipZ[10] = -50.0
+
+        ' edges 0..4 = outline (wings + rear edge), 5..13 = spine, keel and fin
+        g_shipEA[0] = 0 : g_shipEB[0] = 1
+        g_shipEA[1] = 0 : g_shipEB[1] = 2
+        g_shipEA[2] = 1 : g_shipEB[2] = 3
+        g_shipEA[3] = 2 : g_shipEB[3] = 4
+        g_shipEA[4] = 3 : g_shipEB[4] = 4
+        g_shipEA[5] = 0 : g_shipEB[5] = 5
+        g_shipEA[6] = 5 : g_shipEB[6] = 3
+        g_shipEA[7] = 5 : g_shipEB[7] = 4
+        g_shipEA[8] = 0 : g_shipEB[8] = 6
+        g_shipEA[9] = 6 : g_shipEB[9] = 3
+        g_shipEA[10] = 6 : g_shipEB[10] = 4
+        g_shipEA[11] = 5 : g_shipEB[11] = 7
+        g_shipEA[12] = 7 : g_shipEB[12] = 8
+        g_shipEA[13] = 8 : g_shipEB[13] = 5
+        g_shipInit = 1
+    ENDIF
+
+    ' ---- attitude and position from the camera motion ----
+    sc    = FLOAT(screenW) / 800.0
+    yaw   = 0 ' -driftX * 0.0030
+    pitch = -driftY * 0.0020
+    roll  = (bankAng * 0.7) - yaw                 ' lean into the turn (flip the sign of bankAng if it banks the wrong way)
+    cyw = COS(yaw)   : syw = SIN(yaw)
+    cpt = COS(pitch) : spt = SIN(pitch)
+    crl = COS(roll)  : srl = SIN(roll)
+    offX = 0 ' -driftX * 0.3 * sc
+    offY = 0 ' (-driftY * 0.3 * sc) + (5.0 * sc * SIN(tPhase * 1.7))
+
+    ' ---- engine flames: length from beat + flicker ----
+    g_shipZ[9]  = -30.0 - (90.0 + (g_beatPulse * 80.0) + RND(25.0))
+    g_shipZ[10] = -30.0 - (90.0 + (g_beatPulse * 80.0) + RND(25.0))
+
+    ' ---- rotate (yaw, pitch, roll) and project ----
+    FOR i = 0 TO 10
+        px = g_shipX[i] : py = g_shipY[i] : pz = g_shipZ[i]
+        x1 = (px * cyw) + (pz * syw)
+        z1 = (pz * cyw) - (px * syw)
+        y2 = (py * cpt) - (z1 * spt)
+        z2 = (py * spt) + (z1 * cpt)
+        x3 = (x1 * crl) - (y2 * srl)
+        y3 = (x1 * srl) + (y2 * crl)
+        sf = (270.0 / (z2 + 260.0)) * sc
+        g_shipSX[i] = INT(cx + offX + (x3 * sf))
+        g_shipSY[i] = INT(cy + offY - (y3 * sf))
+    NEXT i
+
+    ' ---- hull colours (brighter on the beat), added onto the stars ----
+    bk = 256 + INT(g_beatPulse * 110.0)
+    hr = (110 * bk) >> 8 : hg = (205 * bk) >> 8 : hb = (255 * bk) >> 8
+    ir = (60 * bk) >> 8  : ig = (140 * bk) >> 8 : ib2 = (215 * bk) >> 8
+    IF hr > 255 THEN hr = 255
+    IF hg > 255 THEN hg = 255
+    IF hb > 255 THEN hb = 255
+    IF ir > 255 THEN ir = 255
+    IF ig > 255 THEN ig = 255
+    IF ib2 > 255 THEN ib2 = 255
+    hullCol  = 0xFF000000 | (hr << 16) | (hg << 8) | hb
+    innerCol = 0xFF000000 | (ir << 16) | (ig << 8) | ib2
+
+    FOR ei = 0 TO 13
+        ia = g_shipEA[ei]
+        ib = g_shipEB[ei]
+        IF ei < 5 THEN edgeCol = hullCol ELSE edgeCol = innerCol
+        DrawLineAdd(pBuffer, screenW, screenH, g_shipSX[ia], g_shipSY[ia], g_shipSX[ib], g_shipSY[ib], edgeCol, 0)
+        DrawLineAdd(pBuffer, screenW, screenH, g_shipSX[ia] + 1, g_shipSY[ia], g_shipSX[ib] + 1, g_shipSY[ib], edgeCol, 0)
+    NEXT ei
+
+    ' ---- flames: a cone of 9 lines per engine, converging at the nozzle ----
+    FOR fk = -4 TO 4
+        DrawStreakAdd(pBuffer, screenW, g_shipSX[9]  + INT(FLOAT(fk * 3) * sc), g_shipSY[9],  g_shipSX[3] + (fk / 2), g_shipSY[3], 0xFF824010, 45, topY, screenW - 49, bottomY - 1)
+        DrawStreakAdd(pBuffer, screenW, g_shipSX[10] + INT(FLOAT(fk * 3) * sc), g_shipSY[10], g_shipSX[4] + (fk / 2), g_shipSY[4], 0xFF824010, 45, topY, screenW - 49, bottomY - 1)
+    NEXT fk
+ENDSUB
+
+SUB DrawHyperStarsDirect(pLayerBuffer:POINTER, screenW:INT, screenH:INT)
+    DEF i, sx, sy, col, cv, qy:INT
+    FLOAT rotAngle, mo1, mo2
+    FLOAT worldX, worldY, rotX, rotY
+    FLOAT dxm, dym, dzm
+    FLOAT cx = FLOAT(screenW) * 0.5
+    FLOAT cy = FLOAT(screenH) * 0.5
+    POINTER pPixel
+
+    STATIC FLOAT phase = 0.0
+    phase = phase + 0.035
+
+    INT topY = 157
+    INT bottomY = screenH - 161
+    INT regionHeight = bottomY - topY
+    INT topOffset = topY * screenW * 4
+    INT regionQuadCount = (regionHeight * screenW) >> 2
+    INT bufferSize = screenW * (screenH + 4) * 4
+    INT tailX, tailY, vis, tn, ci, palA, palB, aR, aG, aB, bR, bG, bB, pR, pG, pB, sr, sg, sb
+    FLOAT zPrev, streakK
+
+
+    IF pLayerBuffer = NULL THEN
+        ALLOCMEM(pLayerBuffer, bufferSize, 1)
+        g_pAsmPixel = pLayerBuffer
+        g_asmCount = bufferSize / 4
+        _asm
+            mov edi, [g_pAsmPixel]
+            mov ecx, [g_asmCount]
+            xor eax, eax
+            rep stosd
+        _endasm
+    ELSE
+        IF g_warpSpeedActive = 1 THEN
+            dzm = 8.5 + 2.5 * SIN(phase * 1.5)
+
+            g_pAsmPixel = pLayerBuffer + topOffset
+            g_asmCount = regionQuadCount
+
+            _asm
+                push edi
+                mov edi, [g_pAsmPixel]
+                mov ecx, [g_asmCount]
+
+                mov eax, 0x007F7F7F
+                movd xmm2, eax
+                pshufd xmm2, xmm2, 0x00
+
+            hyperstars_decay_loop:
+                movdqu xmm0, [edi]
+                psrld xmm0, 1
+                pand xmm0, xmm2
+                psrld xmm0, 1
+                movdqu [edi], xmm0
+                add edi, 16
+                dec ecx
+                jnz hyperstars_decay_loop
+
+                pop edi
+            _endasm
+        ELSE
+            dzm = (1.8 + (0.6 * SIN(phase * 0.7))) * (1.0 + (g_beatPulse * 1.6))
+            g_pAsmPixel = pLayerBuffer + topOffset
+            g_asmCount = regionQuadCount * 4
+        ENDIF
+    ENDIF
+
+    IF g_hyperStarsInit = 0 THEN
+        FOR i = 1 TO 500
+            g_starX[i] = -8000.0 + (RND(1.0) * 16000.0)
+            g_starY[i] = -8000.0 + (RND(1.0) * 16000.0)
+            g_starZ[i] = 1.0 + (RND(1.0) * 149.0)
+        NEXT i
+        g_hyperStarsInit = 1
+    ENDIF
+
+    rotAngle = 0.8 * SIN(phase * 0.4)
+    mo1 = COS(rotAngle)
+    mo2 = SIN(rotAngle)
+    dxm = 120.0 * SIN(phase * 0.5)
+    dym = 120.0 * COS(phase * 0.3)
+
+    streakK = 1.8                                  ' tail length in "frames of flight" (bigger = longer streaks)
+
+    ci   = INT(phase * 35.0) & 255                 ' two palette colours half a cycle apart
+    palA = GetCycleColor(ci)
+    palB = GetCycleColor((ci + 128) & 255)
+    aR = (palA >> 16) & 255 : aG = (palA >> 8) & 255 : aB = palA & 255
+    bR = (palB >> 16) & 255 : bG = (palB >> 8) & 255 : bB = palB & 255
+
+    FOR i = 1 TO 500
+        g_starZ[i] = g_starZ[i] - dzm
+
+        IF g_starZ[i] <= 1.0 THEN
+            FLOAT ang = RND(1.0) * 6.283185
+            FLOAT rad = 500.0 + RND(1.0) * 7500.0
+            g_starX[i] = COS(ang) * rad
+            g_starY[i] = SIN(ang) * rad
+            g_starZ[i] = 145.0 + (RND(1.0) * 10.0)
+        ENDIF
+
+        worldX = g_starX[i] + dxm
+        worldY = g_starY[i] + dym
+        rotX = worldX * mo1 - worldY * mo2
+        rotY = worldX * mo2 + worldY * mo1
+
+        IF g_starZ[i] > 0.5 THEN
+            sx = INT(cx + (rotX / g_starZ[i]))                 ' head: where the star is now
+            sy = INT(cy + (rotY / g_starZ[i]))
+            zPrev = g_starZ[i] + (dzm * streakK)
+            tailX = INT(cx + (rotX / zPrev))                   ' tail: where it was a moment ago
+            tailY = INT(cy + (rotY / zPrev))
+
+            vis = 0
+            IF sx >= 45 AND sx < (screenW - 49) AND sy >= topY AND sy < (bottomY - 1) THEN vis = 1
+            IF tailX >= 45 AND tailX < (screenW - 49) AND tailY >= topY AND tailY < (bottomY - 1) THEN vis = 1
+            IF ABS(sx - tailX) > 600 OR ABS(sy - tailY) > 600 THEN vis = 0     ' safety: never walk a huge line
+
+            IF vis = 1 THEN
+                cv = INT(255.0 - (g_starZ[i] * 1.65))
+                IF cv > 255 THEN cv = 255
+                IF cv < 0 THEN cv = 0
+
+                IF cv > 15 THEN
+                    tn = 256 - INT(g_starZ[i] * 1.7)               ' nearness 0 (far) .. 256 (near)
+                    IF tn < 0 THEN tn = 0
+                    IF tn > 256 THEN tn = 256
+                    tn = (tn * tn) >> 8                            ' far stars stay blue-white for longer
+
+                    IF (i & 1) = 1 THEN
+                        pR = bR : pG = bG : pB = bB
+                    ELSE
+                        pR = aR : pG = aG : pB = aB
+                    ENDIF
+
+                    sr = ((170 * (256 - tn)) + (pR * tn)) >> 8      ' far colour = (170,200,255)
+                    sg = ((200 * (256 - tn)) + (pG * tn)) >> 8
+                    sb = ((255 * (256 - tn)) + (pB * tn)) >> 8
+                    sr = (sr * cv) >> 8
+                    sg = (sg * cv) >> 8
+                    sb = (sb * cv) >> 8
+                    col = 0xFF000000 | (sr << 16) | (sg << 8) | sb
+
+                    DrawStreakAdd(pLayerBuffer, screenW, tailX, tailY, sx, sy, col, 45, topY, screenW - 49, bottomY - 1)
+                ENDIF
+            ENDIF
+        ENDIF
+    NEXT i
+    DrawHyperShip(pLayerBuffer, screenW, screenH, rotAngle, dxm, dym, phase)
+ENDSUB
+
+SUB SW_InitEngine()
+    INT a
+
+    FOR a = 1 TO 14999
+        g_sw_SinTable[a] = 1150.0 + 140.0 * SIN(a / 360.0)
+    NEXT a
+
+    g_sw_MeshPoints = 14
+    g_sw_MeshFaces = 6
+    
+    g_sw_Vx[1] = -10 : g_sw_Vy[1] = -10 : g_sw_Vz[1] = -10
+    g_sw_Vx[2] =  10 : g_sw_Vy[2] = -10 : g_sw_Vz[2] = -10
+    g_sw_Vx[3] =  10 : g_sw_Vy[3] =  10 : g_sw_Vz[3] = -10
+    g_sw_Vx[4] = -10 : g_sw_Vy[4] =  10 : g_sw_Vz[4] = -10
+    g_sw_Vx[5] = -10 : g_sw_Vy[5] = -10 : g_sw_Vz[5] =  10
+    g_sw_Vx[6] =  10 : g_sw_Vy[6] = -10 : g_sw_Vz[6] =  10
+    g_sw_Vx[7] =  10 : g_sw_Vy[7] =  10 : g_sw_Vz[7] =  10
+    g_sw_Vx[8] = -10 : g_sw_Vy[8] =  10 : g_sw_Vz[8] =  10
+
+    g_sw_Vf1[1] = 1 : g_sw_Vf2[1] = 2 : g_sw_Vf3[1] = 3 : g_sw_Vf4[1] = 4
+    g_sw_Vf1[2] = 6 : g_sw_Vf2[2] = 5 : g_sw_Vf3[2] = 8 : g_sw_Vf4[2] = 7
+    g_sw_Vf1[3] = 1 : g_sw_Vf2[3] = 5 : g_sw_Vf3[3] = 6 : g_sw_Vf4[3] = 2
+    g_sw_Vf1[4] = 4 : g_sw_Vf2[4] = 3 : g_sw_Vf3[4] = 7 : g_sw_Vf4[4] = 8
+    g_sw_Vf1[5] = 5 : g_sw_Vf2[5] = 1 : g_sw_Vf3[5] = 4 : g_sw_Vf4[5] = 8
+    g_sw_Vf1[6] = 2 : g_sw_Vf2[6] = 6 : g_sw_Vf3[6] = 7 : g_sw_Vf4[6] = 3
+
+    g_sw_Vxr = 0.1
+    g_sw_Vyr = 0.2
+    g_sw_Vzr = 0.0
+ENDSUB
+
+SUB ATAN2(y:FLOAT, x:FLOAT), FLOAT
+    IF x > 0.0 THEN RETURN ATAN(y / x)
+    IF x < 0.0 THEN
+        IF y >= 0.0 THEN RETURN ATAN(y / x) + PI_VAL
+        RETURN ATAN(y / x) - PI_VAL
+    ENDIF
+    IF y > 0.0 THEN RETURN 1.570796327
+    IF y < 0.0 THEN RETURN -1.570796327
+    RETURN 0.0
+ENDSUB
+
+SUB SW_DrawBob16x16(bx AS INT, by AS INT, rVal AS INT, gVal AS INT, bVal AS INT, pPixelBuffer AS POINTER, screenW AS INT, screenH AS INT)
+    INT x, y
+    POINTER pp
+    UINT curPix, r, g, b
+
+    IF (bx > 0) AND (by > 0) AND (bx < screenW - 16) AND (by < screenH - 16) THEN
+        FOR y = 0 TO 15
+            pp = pPixelBuffer + ((bx + ((by + y) * screenW)) * 4)
+            FOR x = 0 TO 15
+                curPix = #<UINT>pp
+                
+                r = ((curPix >> 16) & 0xFF) + rVal
+                g = ((curPix >> 8) & 0xFF) + gVal
+                b = (curPix & 0xFF) + bVal
+
+                IF r > 255 THEN r = 255
+                IF g > 255 THEN g = 255
+                IF b > 255 THEN b = 255
+
+                #<UINT>pp = 0xFF000000 | (r << 16) | (g << 8) | b
+                pp += 4
+            NEXT x
+        NEXT y
+    ENDIF
+ENDSUB
+
+SUB DrawBobGridComposite(pBuffer:POINTER, screenW:INT, screenH:INT)
+    Draw3DGridMeshDirect(pBuffer, screenW, screenH, 0xFF00FFFF)
+    SW_RenderBobSnakeProcedural(pBuffer, screenW, screenH)
+ENDSUB
+
+SUB AlphaBlendBuffersASM(pTargetBuf:POINTER, pSrcBuf:POINTER, numPix:INT, alphaVal:INT)
+    IF pTargetBuf = NULL OR pSrcBuf = NULL OR alphaVal <= 0 THEN RETURN
+    IF alphaVal > 255 THEN alphaVal = 255
+
+    g_pAsmDst = pTargetBuf
+    g_pAsmSrc = pSrcBuf
+    g_asmCount = numPix >> 2                 ' 4 pixels per iteration (a leftover of 1-3 pixels is skipped)
+    g_asmAlpha = alphaVal
+    g_asmInvAlpha = 256 - alphaVal
+    g_asmPixelColor = 0xFF000000
+
+    _asm
+        push edi
+        push esi
+
+        mov edi, [g_pAsmDst]
+        mov esi, [g_pAsmSrc]
+        mov ecx, [g_asmCount]
+        test ecx, ecx
+        jz alpha_exit
+
+        mov eax, [g_asmAlpha]
+        movd xmm6, eax
+        pshuflw xmm6, xmm6, 0
+        punpcklqdq xmm6, xmm6                ; src weight
+        mov eax, [g_asmInvAlpha]
+        movd xmm7, eax
+        pshuflw xmm7, xmm7, 0
+        punpcklqdq xmm7, xmm7                ; dst weight
+        movd xmm5, [g_asmPixelColor]
+        pshufd xmm5, xmm5, 0
+        pxor xmm4, xmm4
+
+    alpha_loop:
+        movdqu xmm0, [edi]                   ; new frame
+        movdqu xmm2, [esi]                   ; old frame snapshot
+        movdqa xmm1, xmm0
+        movdqa xmm3, xmm2
+        punpcklbw xmm0, xmm4
+        punpckhbw xmm1, xmm4
+        punpcklbw xmm2, xmm4
+        punpckhbw xmm3, xmm4
+        pmullw xmm0, xmm7
+        pmullw xmm1, xmm7
+        pmullw xmm2, xmm6
+        pmullw xmm3, xmm6
+        paddw xmm0, xmm2
+        paddw xmm1, xmm3
+        psrlw xmm0, 8
+        psrlw xmm1, 8
+        packuswb xmm0, xmm1
+        por xmm0, xmm5
+        movdqu [edi], xmm0
+        add edi, 16
+        add esi, 16
+        dec ecx
+        jnz alpha_loop
+
+    alpha_exit:
+        pop esi
+        pop edi
+    _endasm
+ENDSUB
+
+SUB SW_RenderBobSnakeProcedural(pPixelBuffer AS POINTER, screenW AS INT, screenH AS INT)
+    STATIC INT nodeCount = 1500
+    STATIC FLOAT morphTime = 0.0
+    INT a, x, y
+    INT colorIdx, rgbVal, r, g, b
+    
+    ' Pre-calculated center offsets & fixed bounds
+    INT halfW, halfH
+    halfW = screenW >> 1
+    halfH = screenH >> 1
+
+    morphTime += 0.005
+
+    ' Pre-calculate dynamic frequencies (inverted to avoid floating-point division in loop)
+    FLOAT invFreqX1 = 1.0 / (30.0 + 8.0 * SIN(morphTime * 0.7))
+    FLOAT invFreqX2 = 1.0 / (25.0 + 6.0 * COS(morphTime * 0.5))
+    FLOAT invFreqX3 = 1.0 / (75.0 + 15.0 * SIN(morphTime * 0.3))
+
+    FLOAT invFreqY1 = 1.0 / (50.0 + 10.0 * COS(morphTime * 0.6))
+    FLOAT invFreqY2 = 1.0 / (35.0 + 7.0 * SIN(morphTime * 0.4))
+    FLOAT invFreqY3 = 1.0 / (85.0 + 12.0 * COS(morphTime * 0.8))
+
+    ' Pre-apply beat scale directly to amplitudes outside the loop
+    FLOAT beatScale = 1.0 + (g_beatPulse * 0.35)
+    FLOAT ampX1 = (110.0 + 20.0 * SIN(morphTime * 0.9)) * beatScale
+    FLOAT ampX2 = (90.0  + 15.0 * COS(morphTime * 1.1)) * beatScale
+    FLOAT ampX3 = -45.0 * beatScale
+
+    FLOAT ampY1 = (85.0  + 18.0 * COS(morphTime * 0.8)) * beatScale
+    FLOAT ampY2 = (70.0  + 12.0 * SIN(morphTime * 1.2)) * beatScale
+    FLOAT ampY3 = 45.0 * beatScale
+
+    STATIC DOUBLE gadd = 0.0, gadd2 = 0.0, gadd3 = 0.0
+    gadd  += 0.8
+    gadd2 += 0.5
+    gadd3 += 0.3
+
+    INT phaseOffset
+    phaseOffset = INT(phase * 45.0)
+
+    ' -----------------------------------------------------------------
+    ' MAIN NODE LOOP
+    ' -----------------------------------------------------------------
+    FOR a = 1 TO 3000 STEP 4
+        ' Trigonometric calculation using pre-inverted frequency multipliers
+        x = halfW + INT(ampX1 * SIN((a + gadd2) * invFreqX1) + ampX2 * SIN((gadd + a) * invFreqX2) + ampX3 * SIN((gadd3 + a) * invFreqX3))
+        y = halfH + INT(ampY1 * SIN((a + gadd3) * invFreqY1) + ampY2 * SIN((gadd2 + a) * invFreqY2) + ampY3 * COS((gadd + a) * invFreqY3))
+        
+        colorIdx = (phaseOffset + (a >> 3)) & 255
+        rgbVal = GetCycleColor(colorIdx)
+
+        ' Fast integer-only 40% brightness scaling (102 / 256 ˜ 0.3984)
+        r = (((rgbVal >> 16) & 0xFF) * 102) >> 8
+        g = (((rgbVal >> 8)  & 0xFF) * 102) >> 8
+        b = (( rgbVal        & 0xFF) * 102) >> 8
+
+        SW_DrawBob16x16(x, y, r, g, b, pPixelBuffer, screenW, screenH)
+    NEXT a
+ENDSUB
+
+SUB DrawRasterbarLogoComposite(pBuffer:POINTER, screenW:INT, screenH:INT)
+    DrawRasterbarsEffectDirect(pBuffer, screenW, screenH)
+
+    INT logoX = (screenW - 350) / 2
+    INT logoY = (screenH / 2) - 45
+
+    DrawProceduralLogo(pBuffer, screenW, screenH, logoX, logoY)
+ENDSUB
+
+SUB DrawProceduralLogo(pBuffer:POINTER, screenW:INT, screenH:INT, startX:INT, startY:INT)
+    STATIC INT fontGlyphs[11, 5]
+    STATIC INT fontInited = 0
+    DEF i, col, charIdx:INT
+    DEF fontBit, px, py:INT
+    DEF textColor, outlineColor:INT
+    DEF waveY, lineStartX:INT
+
+    IF fontInited = 0 THEN
+        fontGlyphs[0,0]=0x0E : fontGlyphs[0,1]=0x11 : fontGlyphs[0,2]=0x1F : fontGlyphs[0,3]=0x11 : fontGlyphs[0,4]=0x11
+        fontGlyphs[1,0]=0x1E : fontGlyphs[1,1]=0x11 : fontGlyphs[1,2]=0x1E : fontGlyphs[1,3]=0x10 : fontGlyphs[1,4]=0x10
+        fontGlyphs[2,0]=0x11 : fontGlyphs[2,1]=0x11 : fontGlyphs[2,2]=0x11 : fontGlyphs[2,3]=0x11 : fontGlyphs[2,4]=0x0E
+        fontGlyphs[3,0]=0x1E : fontGlyphs[3,1]=0x11 : fontGlyphs[3,2]=0x1E : fontGlyphs[3,3]=0x14 : fontGlyphs[3,4]=0x13
+        fontGlyphs[4,0]=0x1F : fontGlyphs[4,1]=0x10 : fontGlyphs[4,2]=0x1E : fontGlyphs[4,3]=0x10 : fontGlyphs[4,4]=0x1F
+        fontGlyphs[5,0]=0x0F : fontGlyphs[5,1]=0x10 : fontGlyphs[5,2]=0x0E : fontGlyphs[5,3]=0x01 : fontGlyphs[5,4]=0x1E
+        fontGlyphs[6,0]=0x11 : fontGlyphs[6,1]=0x1B : fontGlyphs[6,2]=0x15 : fontGlyphs[6,3]=0x11 : fontGlyphs[6,4]=0x11
+        fontGlyphs[7,0]=0x0E : fontGlyphs[7,1]=0x04 : fontGlyphs[7,2]=0x04 : fontGlyphs[7,3]=0x04 : fontGlyphs[7,4]=0x0E
+        fontGlyphs[8,0]=0x10 : fontGlyphs[8,1]=0x10 : fontGlyphs[8,2]=0x10 : fontGlyphs[8,3]=0x10 : fontGlyphs[8,4]=0x1F
+        fontGlyphs[9,0]=0x11 : fontGlyphs[9,1]=0x19 : fontGlyphs[9,2]=0x15 : fontGlyphs[9,3]=0x13 : fontGlyphs[9,4]=0x11
+        fontGlyphs[10,0]=0x04 : fontGlyphs[10,1]=0x04 : fontGlyphs[10,2]=0x04 : fontGlyphs[10,3]=0x00 : fontGlyphs[10,4]=0x04
+        fontInited = 1
+    ENDIF
+
+    INT line1Chars[10]
+    line1Chars[0] = 0   ' A
+    line1Chars[1] = -1  ' (space)
+    line1Chars[2] = 1   ' P
+    line1Chars[3] = 2   ' U
+    line1Chars[4] = 3   ' R
+    line1Chars[5] = 4   ' E
+    line1Chars[6] = -1  ' (space)
+    line1Chars[7] = 0   ' A
+    line1Chars[8] = 5   ' S
+    line1Chars[9] = 6   ' M
+
+    INT line2Chars[10]
+    line2Chars[0] = 1   ' P
+    line2Chars[1] = 7   ' I
+    line2Chars[2] = 1   ' P
+    line2Chars[3] = 4   ' E
+    line2Chars[4] = 8   ' L
+    line2Chars[5] = 7   ' I
+    line2Chars[6] = 9   ' N
+    line2Chars[7] = 4   ' E
+    line2Chars[8] = -1  ' (space)
+    line2Chars[9] = 10  ' !
+
+    INT scale = 6
+    INT charSpacing = 36
+    INT lineOffsetY = 48
+
+    INT baseColor = GetCycleColor(INT(phase * 40.0) & 255)
+    INT r = (baseColor >> 16) & 0xFF
+    INT g = (baseColor >> 8) & 0xFF
+    INT b = baseColor & 0xFF
+
+    FOR i = 0 TO 1
+        INT lineLen = 10
+        INT curY = startY + (i * lineOffsetY)
+
+        IF i = 0 THEN
+            lineStartX = startX
+        ELSE
+            lineStartX = startX + INT(((10 - lineLen) * charSpacing) / 2)
+        ENDIF
+        
+        FOR col = 0 TO lineLen - 1
+            IF i = 0 THEN charIdx = line1Chars[col] ELSE charIdx = line2Chars[col]
+            
+            IF charIdx <> -1 THEN
+                INT curX = lineStartX + (col * charSpacing)
+                
+                waveY = curY + INT(SIN((phase * 4.0) + (col * 0.4)) * 6.0)
+
+                FOR py = 0 TO 4
+                    INT rowBits = fontGlyphs[charIdx, py]
+                    FOR px = 0 TO 4
+                        fontBit = (rowBits >> (4 - px)) & 1
+                        
+                        IF fontBit = 1 THEN
+                            INT shine = 180 + (py * 15)
+                            INT finalR = (r * shine) >> 8 : IF finalR > 255 THEN finalR = 255
+                            INT finalG = (g * shine) >> 8 : IF finalG > 255 THEN finalG = 255
+                            INT finalB = (b * shine) >> 8 : IF finalB > 255 THEN finalB = 255
+                            
+                            textColor = 0xFF000000 | (finalR << 16) | (finalG << 8) | finalB
+                            outlineColor = 0xFF101010
+
+                            PlotRectDirect(pBuffer, screenW, screenH, curX + (px * scale) - 2, waveY + (py * scale) - 2, scale + 4, scale + 4, outlineColor)
+                            PlotRectDirect(pBuffer, screenW, screenH, curX + (px * scale), waveY + (py * scale), scale, scale, textColor)
+                        ENDIF
+                    NEXT px
+                NEXT py
+            ENDIF
+        NEXT col
+    NEXT i
+ENDSUB
+
+' --- BORDERS GRADIENT STREAM (REPLACES YELLOW BARS) ---
+' --- BORDERS GRADIENT STREAM (WARM AMIGA COPPER LOOKUP-OPTIMIZED) ---
+SUB SW_RenderBorders(gadd2 AS DOUBLE, pPixelBuffer AS POINTER, screenW AS INT, screenH AS INT)
+    INT x1, yOffset, r, g, b, colorVal
+    INT topY = 148
+    INT bottomY = screenH - 150
+    POINTER pPixel
+
+    ' Convert floating-point phase to a fast integer table index
+    INT baseIdx = INT(gadd2 * 3.0) & 255
+
+    FOR x1 = 0 TO screenW - 1
+        ' Calculate lookup indexes with varying frequency offsets across the screen width
+        INT idxR = (baseIdx + (x1 >> 1)) & 255
+        INT idxG = (baseIdx + (x1 / 3)) & 255
+        INT idxB = (baseIdx + (x1 / 4)) & 255
+
+        ' Map table values (-65536 to 65536) to warm Amiga copper channel ranges
+        r = 200 + ((sinTable[idxR] * 55) >> 16)                      ' Dominant bright gold/red peaks
+        g = 100 + ((sinTable[(idxG + 64) & 255] * 60) >> 16)         ' Cosine offset for rich amber blend
+        b = 20  + ((sinTable[idxB] * 20) >> 16)                      ' Subtle deep-red shadow base
+        
+        colorVal = (255 << 24) | (r << 16) | (g << 8) | b
+
+        ' Render the 3-pixel thick top and bottom border streams
+        FOR yOffset = 0 TO 2
+            pPixel = pPixelBuffer + (((topY + yOffset) * screenW + x1) * 4)
+            #<UINT>pPixel = colorVal
+
+            pPixel = pPixelBuffer + (((bottomY + yOffset) * screenW + x1) * 4)
+            #<UINT>pPixel = colorVal
+        NEXT yOffset
+    NEXT x1
+ENDSUB
+
+' --- ENDLESS ISOMETRIC TERRAIN FLYOVER EFFECT ---
+' --- ENDLESS ISOMETRIC TERRAIN FLYOVER EFFECT (FIXED SYNTAX) ---
+SUB DrawIsometricFlyoverDirect(pPixelBuffer:POINTER, screenW:INT, screenH:INT, phaseVal:DOUBLE)
+    INT gx, gy, z, rx, ry, sx, sy
+    INT r, g, b, colorVal
+    INT camX, camY, worldX, worldY
+    INT hIdx1, hIdx2, hIdx3
+    INT camIdx, rawSin
+    POINTER pPixel, pSinTable, pNextRow
+
+    ' Clear screen buffer at assembly speed
+    _asm
+        push edi
+        mov edi, [pPixelBuffer]
+        mov ecx, [screenW]
+        imul ecx, [screenH]
+        xor eax, eax
+        rep stosd
+        pop edi
+    _endasm
+
+    pSinTable = &sinTable[0]
+
+    ' Clean step-by-step camera position calculation (prevents parser syntax errors)
+    camIdx = INT(phaseVal * 2.0) & 255
+    rawSin = #<INT>(pSinTable + (camIdx * 4))
+    camX   = rawSin >> 10                   ' Horizontal camera sway
+    camY   = INT(phaseVal * 24.0)           ' Forward motion speed
+
+    ' Sample a wider extended isometric grid view (-60 to +60)
+    FOR gy = -60 TO 60 STEP 3
+        FOR gx = -60 TO 60 STEP 3
+            
+            ' 1. Map local grid points to continuous World Coordinates
+            worldX = gx + camX
+            worldY = gy + camY
+            
+            ' 2. Procedural terrain elevation sampling across continuous world space
+            hIdx1 = (worldX * 2) & 255
+            hIdx2 = (worldY * 2) & 255
+            hIdx3 = ((worldX + worldY) * 3) & 255
+            
+            ' Multi-layered sine wave height lookup (creates dynamic peaks and valleys)
+            z = (#<INT>(pSinTable + (hIdx1 * 4)) + #<INT>(pSinTable + (hIdx2 * 4)) + #<INT>(pSinTable + (hIdx3 * 4))) >> 12
+
+            ' 3. Isometric Camera Projection (2:1 Axonometric Ratio)
+            rx = gx - gy
+            ry = (gx + gy) >> 1
+            
+            sx = (screenW >> 1) + (rx * 6)
+            sy = (screenH >> 1) + (ry * 5) - z + 40 ' Shifted horizon slightly down
+
+            ' 4. Bounds Check & Plot
+            IF sx >= 2 AND sx < (screenW - 4) AND sy >= 2 AND sy < (screenH - 4) THEN
+                
+                ' Amiga Copper Elevation Shading: Valleys to Glowing Mountain Tops
+                r = 140 + (z * 3)
+                g = 70  + (z * 4)
+                b = 20  + (z * 2)
+
+                IF r > 255 THEN r = 255
+                IF r < 30  THEN r = 30
+                IF g > 255 THEN g = 255
+                IF g < 10  THEN g = 10
+                IF b > 255 THEN b = 255
+                IF b < 0   THEN b = 0
+
+                colorVal = (255 << 24) | (r << 16) | (g << 8) | b
+
+                ' Plot 2x2 Pixel Dot
+                pPixel = pPixelBuffer + (((sy * screenW) + sx) * 4)
+                pNextRow = pPixel + (screenW * 4)
+
+                #<UINT>pPixel = colorVal
+                #<UINT>(pPixel + 4) = colorVal
+                #<UINT>pNextRow = colorVal
+                #<UINT>(pNextRow + 4) = colorVal
+            ENDIF
+        NEXT gx
+    NEXT gy
+ENDSUB
+
+SUB TvBoostRow(pRow:POINTER, nPix:INT, boost:INT)
+    IF pRow = NULL OR nPix <= 0 THEN RETURN
+    IF boost > 255 THEN boost = 255
+    IF boost < 0 THEN boost = 0
+    g_pAsmDst = pRow
+    g_asmCount = nPix >> 2
+    g_asmPixelColor = (boost << 16) | (boost << 8) | boost
+
+    _asm
+        push edi
+        mov edi, [g_pAsmDst]
+        mov ecx, [g_asmCount]
+        test ecx, ecx
+        jz tvb_exit
+        movd xmm2, [g_asmPixelColor]
+        pshufd xmm2, xmm2, 0
+    tvb_loop:
+        movdqu xmm0, [edi]
+        paddusb xmm0, xmm2
+        movdqu [edi], xmm0
+        add edi, 16
+        dec ecx
+        jnz tvb_loop
+    tvb_exit:
+        pop edi
+    _endasm
+ENDSUB
+
+SUB DrawTVStaticDirect(pBuffer:POINTER, screenW:INT, screenH:INT)
+    INT topY, bottomY, viewHeight
+    INT lineY1, lineY2, yOffset, glitchY, glitchHeight, gy
+
+    STATIC FLOAT vcrLineY1 = 180.0
+    STATIC FLOAT vcrLineY2 = 320.0
+
+    topY = 152
+    bottomY = screenH - 152
+    viewHeight = bottomY - topY
+
+    IF pBuffer = NULL OR viewHeight <= 0 THEN RETURN
+
+    ' 1. SNOW: whole viewport in one pass
+    g_pAsmDst     = pBuffer + (topY * screenW * 4)
+    g_asmCount    = screenW
+    g_asmNumBytes = viewHeight
+    g_tvBias      = INT(g_beatPulse * 3.0) * 16        ' 0 .. 48
+
+    _asm
+        push edi
+        push esi
+        push ebx
+        push edx
+
+        mov edi, [g_pAsmDst]
+        mov ecx, [g_asmNumBytes]
+        mov edx, [g_tvSeed]
+        xor ebx, ebx
+
+    tv_y_loop:
+        push ecx
+
+        ; one generator step per line, then decide whether this line is dimmed (1 line in 4)
+        mov eax, edx
+        shl eax, 13
+        xor edx, eax
+        mov eax, edx
+        shr eax, 17
+        xor edx, eax
+        mov eax, edx
+        shl eax, 5
+        xor edx, eax
+
+        xor ecx, ecx
+        mov eax, edx
+        shr eax, 30
+        cmp eax, 3
+        jne tv_line_set
+        mov ecx, 1
+    tv_line_set:
+        mov esi, [g_asmCount]
+
+    tv_x_loop:
+        mov eax, edx
+        shl eax, 13
+        xor edx, eax
+        mov eax, edx
+        shr eax, 17
+        xor edx, eax
+        mov eax, edx
+        shl eax, 5
+        xor edx, eax
+
+        test edx, 0x00100000
+        jz tv_keep                  ; half of the pixels repeat the previous one: horizontal streaks
+
+        mov eax, edx
+        shr eax, 8
+        and eax, 0xFF
+        shr eax, cl                 ; dimmed line: half brightness
+        add eax, [g_tvBias]
+        cmp eax, 255
+        jle tv_bright_ok
+        mov eax, 255
+    tv_bright_ok:
+        mov ebx, eax
+        shl ebx, 8
+        or  ebx, eax
+        shl ebx, 8
+        or  ebx, eax
+        or  ebx, 0xFF000000
+
+    tv_keep:
+        mov [edi], ebx
+        add edi, 4
+        dec esi
+        jnz tv_x_loop
+
+        pop ecx
+        dec ecx
+        jnz tv_y_loop
+
+        mov [g_tvSeed], edx         ; keep the sequence going next frame
+        pop edx
+        pop ebx
+        pop esi
+        pop edi
+    _endasm
+
+    ' 2. HEAVY BEAT: a few bright thin lines
+    IF g_beatPulse > 0.65 THEN
+        glitchY = RAND(topY + 10, bottomY - 20)
+        glitchHeight = RAND(1, 4)
+        FOR gy = glitchY TO glitchY + glitchHeight
+            TvBoostRow(pBuffer + (gy * screenW * 4), screenW, 120)
+        NEXT gy
+    ENDIF
+
+    ' 3. TWO TRACKING BARS: one falls (faster on the beat), one rises
+    vcrLineY1 = vcrLineY1 + 1.8 + (g_beatPulse * 4.0)
+    IF vcrLineY1 >= FLOAT(bottomY - 10) THEN vcrLineY1 = FLOAT(topY + 10)
+    vcrLineY2 = vcrLineY2 - 1.2
+    IF vcrLineY2 <= FLOAT(topY + 10) THEN vcrLineY2 = FLOAT(bottomY - 10)
+
+    lineY1 = INT(vcrLineY1)
+    lineY2 = INT(vcrLineY2)
+
+    FOR yOffset = 0 TO 5
+        gy = lineY1 + yOffset
+        IF gy >= topY AND gy < bottomY THEN TvBoostRow(pBuffer + (gy * screenW * 4), screenW, 100 - (yOffset * 16))
+        gy = lineY2 + yOffset
+        IF gy >= topY AND gy < bottomY THEN TvBoostRow(pBuffer + (gy * screenW * 4), screenW, 50 - (yOffset * 8))
+    NEXT yOffset
+ENDSUB
+
+' Scanlines
+SUB ApplyPostFX(pSrc:POINTER, pDst:POINTER, w:INT, h:INT)
+
+    IF pSrc = NULL OR pDst = NULL OR w < 8 OR h < 2 THEN RETURN
+    IF (w & 3) <> 0 THEN
+        FastCopyBuffer(pDst, pSrc, w * h)
+        RETURN
+    ENDIF
+
+    g_pAsmSrc     = pSrc
+    g_pAsmDst     = pDst
+    g_pfChunks    = w >> 2
+    g_asmNumBytes = h
+    g_pfDark      = 192                      ' 256 = no darkening, 192 = 75%, 160 = 62%
+
+    _asm
+        push edi
+        push esi
+        push ebx
+
+        mov esi, [g_pAsmSrc]
+        mov edi, [g_pAsmDst]
+        xor ebx, ebx
+
+        pxor xmm4, xmm4
+
+    pf_row:
+        mov eax, 256
+        test ebx, 1
+        jz pf_factor
+        mov eax, [g_pfDark]
+    pf_factor:
+        movd xmm3, eax
+        pshuflw xmm3, xmm3, 0
+        punpcklqdq xmm3, xmm3               ; row brightness factor in all 8 words
+
+        mov ecx, [g_pfChunks]
+
+    pf_loop:
+        movdqu xmm0, [esi]
+        movdqa xmm1, xmm0
+        punpcklbw xmm0, xmm4
+        punpckhbw xmm1, xmm4
+        pmullw xmm0, xmm3
+        pmullw xmm1, xmm3
+        psrlw xmm0, 8
+        psrlw xmm1, 8
+        packuswb xmm0, xmm1
+        movdqu [edi], xmm0
+        add esi, 16
+        add edi, 16
+        dec ecx
+        jnz pf_loop
+
+        inc ebx
+        cmp ebx, [g_asmNumBytes]
+        jl pf_row
+
+        pop ebx
+        pop esi
+        pop edi
+    _endasm
+ENDSUB
+
+' --- FAST x86 BLOCK COPY (Replaces RtlMoveMemory) ---
+' Copies 4 bytes (1 ARGB pixel) per iteration directly via CPU registers
+' Preserve edi/esi (they are callee-saved in the Win32 convention) ----
+SUB FastCopyBuffer(pDest:UINT, pSrc:UINT, dwordCount:INT)
+    _asm
+        push edi
+        push esi
+        mov edi, [ebp+8]    ; pDest
+        mov esi, [ebp+12]   ; pSrc
+        mov ecx, [ebp+16]   ; dwordCount
+        cld
+        rep movsd
+        pop esi
+        pop edi
+    _endasm
+ENDSUB
+
+SUB Handler(), INT
+    SELECT @MESSAGE
+        CASE @IDCLOSEWINDOW
+            CLOSEWINDOW main_win
+
+        CASE @IDCHAR
+            IF @WPARAM = 32 THEN
+                ' Fast buffer snapshot using inline x86 rep movsd
+                IF pPixelBuffer <> NULL AND pTransitionBuffer <> NULL THEN
+                    FastCopyBuffer(pTransitionBuffer, pPixelBuffer, g_bufferDwordCount)
+                ENDIF
+
+                g_isTransitioning = 1
+                g_transitionFrame = 0
+
+                current_overlay = (current_overlay + 1) % 21
+                g_overlayEpoch = g_overlayEpoch + 1
+                frame_count = 0
+                
+                IF current_overlay <> lastOverlayIdx THEN
+                    lastOverlayIdx = current_overlay
+                    bannerDropTimer = 0.0
+                    g_waveTransformTimer = 0.0
+                ENDIF
+
+            ELSEIF @WPARAM = 70 OR @WPARAM = 102 THEN
+                g_postFX = 1 - g_postFX
+
+            ELSEIF @WPARAM = 27 THEN
+                CLOSEWINDOW main_win
+            ENDIF
+    ENDSELECT
+    RETURN 0
+ENDSUB
+
+DATABEGIN font_data_start
+' 65 Character Definitions (ASCII 32 to 96)
+DATA 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 : ' Space
+DATA 0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,0,0 : ' !
+DATA 1,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0 : ' "
+DATA 1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0 : ' #
+DATA 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 : ' $
+DATA 1,0,0,1,1,0,0,1,0,0,0,0,0,0,1,1,1,0,0,1 : ' %
+DATA 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1 : ' &
+DATA 0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0 : ' '
+DATA 0,0,0,1,0,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0 : ' (
+DATA 0,0,1,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1,0,1 : ' )
+DATA 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,0,0,0,0 : ' *
+DATA 0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0 : ' +
+DATA 0,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,1,1 : ' ,
+DATA 0,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0 : ' -
+DATA 0,0,1,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0 : ' .
+DATA 0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0 : ' /
+DATA 1,1,1,1,1,1,1,1,0,0,0,0,1,1,0,0,0,0,0,0 : ' 0
+DATA 0,0,1,1,0,0,0,0,1,1,0,0,0,0,0,0,1,0,0,0 : ' 1
+DATA 0,1,1,1,0,1,1,1,0,0,1,1,0,0,0,0,0,0,0,0 : ' 2
+DATA 0,0,1,1,1,1,1,1,0,0,0,1,0,0,0,0,0,0,0,0 : ' 3
+DATA 0,0,0,0,1,1,0,0,0,0,1,1,0,0,0,0,1,0,0,0 : ' 4
+DATA 1,0,1,1,1,0,1,1,0,0,1,1,0,0,0,0,0,0,0,0 : ' 5
+DATA 0,1,1,1,1,0,1,0,0,0,1,1,0,0,0,0,1,0,0,0 : ' 6
+DATA 0,0,0,0,1,1,1,1,0,0,0,1,0,0,0,0,0,0,0,0 : ' 7
+DATA 0,0,1,1,0,0,1,1,0,0,0,0,1,1,1,1,0,0,0,0 : ' 8
+DATA 1,0,0,0,1,1,1,1,0,0,1,1,0,0,0,0,0,0,0,0 : ' 9
+DATA 0,0,1,1,0,0,1,1,0,0,0,0,1,1,1,1,0,0,0,0 : ' :
+DATA 0,0,1,1,0,0,1,1,0,0,0,0,1,1,1,1,0,0,0,0 : ' ;
+DATA 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,1,0 : ' <
+DATA 0,0,1,1,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0 : ' =
+DATA 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,1 : ' >
+DATA 0,0,0,0,0,1,1,1,0,1,0,1,0,0,0,0,0,0,0,0 : ' ?
+DATA 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 : ' @
+DATA 0,1,0,0,1,0,0,0,0,0,1,1,0,0,0,0,1,1,0,0 : ' A
+DATA 1,1,1,1,1,0,0,1,0,0,1,1,0,0,0,0,0,1,0,0 : ' B
+DATA 0,0,0,1,0,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0 : ' C
+DATA 1,1,1,1,1,0,0,1,0,0,0,0,0,0,0,0,0,1,0,0 : ' D
+DATA 0,0,0,1,0,0,1,0,0,0,1,1,0,0,0,0,1,0,1,0 : ' E
+DATA 0,1,0,0,0,0,1,0,0,0,1,1,0,0,0,0,1,0,0,0 : ' F
+DATA 0,1,1,1,1,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0 : ' G
+DATA 1,1,0,0,1,1,0,0,0,0,1,1,0,0,0,0,0,0,0,0 : ' H
+DATA 0,0,1,1,0,0,1,1,1,1,0,0,0,0,0,0,0,0,0,0 : ' I
+DATA 0,1,1,0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,1 : ' J
+DATA 1,1,0,0,1,0,0,0,0,0,1,1,0,0,1,0,0,0,0,0 : ' K
+DATA 1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 : ' L
+DATA 1,1,0,0,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0 : ' M
+DATA 1,1,0,0,1,1,0,0,0,0,0,0,1,1,0,0,0,0,0,0 : ' N
+DATA 1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0 : ' O
+DATA 1,1,0,0,0,1,1,1,0,0,1,1,0,0,0,0,0,0,0,0 : ' P
+DATA 1,1,1,0,0,1,1,1,0,0,0,0,0,1,0,0,0,0,0,1 : ' Q
+DATA 1,1,0,0,0,0,1,1,0,0,1,0,0,1,1,0,0,0,0,0 : ' R
+DATA 1,0,1,1,1,0,1,1,0,0,1,1,0,0,0,0,0,0,0,0 : ' S
+DATA 0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,0,0 : ' T
+DATA 1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0 : ' U
+DATA 1,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,1,1 : ' V
+DATA 1,1,1,1,1,1,0,0,0,1,0,0,0,0,0,0,0,0,0,0 : ' W
+DATA 0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,0 : ' X
+DATA 1,0,1,1,1,1,0,0,0,0,1,1,0,0,0,0,0,0,0,0 : ' Y
+DATA 0,0,1,1,0,0,1,1,0,0,0,0,0,0,1,1,0,0,0,0 : ' Z
+DATA 1,1,1,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0 : ' [
+DATA 0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0 : ' \
+DATA 0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0 : ' ]
+DATA 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,0 : ' ^
+DATA 0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 : ' _
+DATAEND
